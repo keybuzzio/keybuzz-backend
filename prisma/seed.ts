@@ -1,85 +1,97 @@
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient } from @prisma/client;
+import bcrypt from bcrypt;
 
 const prisma = new PrismaClient();
+const saltRounds = 10;
+
+async function hashPassword(plain: string): Promise<string> {
+  return bcrypt.hash(plain, saltRounds);
+}
 
 async function main() {
   const tenant1 = await prisma.tenant.upsert({
-    where: { slug: "acme-electronics" },
+    where: { slug: acme-electronics },
     update: {},
     create: {
-      slug: "acme-electronics",
-      name: "Acme Electronics",
-      plan: "PRO",
-      status: "ACTIVE",
+      slug: acme-electronics,
+      name: Acme Electronics,
+      plan: PRO,
+      status: ACTIVE,
     },
   });
 
   const tenant2 = await prisma.tenant.upsert({
-    where: { slug: "techcorp-solutions" },
+    where: { slug: techcorp-solutions },
     update: {},
     create: {
-      slug: "techcorp-solutions",
-      name: "TechCorp Solutions",
-      plan: "ENTERPRISE",
-      status: "ACTIVE",
+      slug: techcorp-solutions,
+      name: TechCorp Solutions,
+      plan: ENTERPRISE,
+      status: ACTIVE,
     },
   });
 
   const tenant3 = await prisma.tenant.upsert({
-    where: { slug: "globex-retail" },
+    where: { slug: globex-retail },
     update: {},
     create: {
-      slug: "globex-retail",
-      name: "Globex Retail",
-      plan: "STARTER",
-      status: "TRIAL",
+      slug: globex-retail,
+      name: Globex Retail,
+      plan: STARTER,
+      status: TRIAL,
+    },
+  });
+
+  const superAdminPassword = await hashPassword(change-me);
+  const ownerAcmePassword = await hashPassword(owner-acme-123);
+  const adminTechcorpPassword = await hashPassword(admin-techcorp-123);
+  const ownerGlobexPassword = await hashPassword(owner-globex-123);
+
+  await prisma.user.upsert({
+    where: { email: admin@keybuzz.io },
+    update: {},
+    create: {
+      email: admin@keybuzz.io,
+      fullName: KeyBuzz Super Admin,
+      role: SUPER_ADMIN,
+      tenantId: null,
+      passwordHash: superAdminPassword,
     },
   });
 
   await prisma.user.upsert({
-    where: { email: "admin@keybuzz.io" },
+    where: { email: owner@acme-electronics.com },
     update: {},
     create: {
-      email: "admin@keybuzz.io",
-      fullName: "KeyBuzz Super Admin",
-      role: "SUPER_ADMIN",
-      passwordHash: "TODO_HASH",
-    },
-  });
-
-  await prisma.user.upsert({
-    where: { email: "owner@acme-electronics.com" },
-    update: {},
-    create: {
-      email: "owner@acme-electronics.com",
-      fullName: "Acme Owner",
-      role: "OWNER",
+      email: owner@acme-electronics.com,
+      fullName: Acme Owner,
+      role: OWNER,
       tenantId: tenant1.id,
-      passwordHash: "TODO_HASH",
+      passwordHash: ownerAcmePassword,
     },
   });
 
   await prisma.user.upsert({
-    where: { email: "admin@techcorp-solutions.com" },
+    where: { email: admin@techcorp-solutions.com },
     update: {},
     create: {
-      email: "admin@techcorp-solutions.com",
-      fullName: "TechCorp Admin",
-      role: "ADMIN",
+      email: admin@techcorp-solutions.com,
+      fullName: TechCorp Admin,
+      role: ADMIN,
       tenantId: tenant2.id,
-      passwordHash: "TODO_HASH",
+      passwordHash: adminTechcorpPassword,
     },
   });
 
   await prisma.user.upsert({
-    where: { email: "owner@globex-retail.com" },
+    where: { email: owner@globex-retail.com },
     update: {},
     create: {
-      email: "owner@globex-retail.com",
-      fullName: "Globex Owner",
-      role: "OWNER",
+      email: owner@globex-retail.com,
+      fullName: Globex Owner,
+      role: OWNER,
       tenantId: tenant3.id,
-      passwordHash: "TODO_HASH",
+      passwordHash: ownerGlobexPassword,
     },
   });
 }
@@ -90,6 +102,5 @@ main()
     process.exit(1);
   })
   .finally(async () => {
-    await prisma.$disconnect();
+    await prisma.();
   });
-

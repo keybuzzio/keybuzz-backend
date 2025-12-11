@@ -1,23 +1,36 @@
-import type { AuthUser } from "./auth.types";
+import bcrypt from "bcrypt";
+import type { AuthUser, UserRole } from "./auth.types";
+import { prisma } from "../../lib/db";
 
-export async function mockLogin(
+export async function hashPassword(plain: string): Promise<string> {
+  const saltRounds = 10;
+  return bcrypt.hash(plain, saltRounds);
+}
+
+function toAuthRole(role: string): UserRole {
+  return role.toLowerCase() as UserRole;
+}
+
+export async function loginWithEmailPassword(
   email: string,
   password: string
-): Promise<{ user: AuthUser; token: string } | null> {
-  // TODO: Replace with DB lookup + password hash verification
-  if (email === "admin@keybuzz.io" && password === "change-me") {
-    return {
-      user: {
-        id: "user-superadmin",
-        tenantId: null,
-        email,
-        fullName: "KeyBuzz Super Admin",
-        role: "super_admin",
-      },
-      token: "mock-jwt-token",
-    };
-  }
+): Promise<AuthUser | null> {
+  const user = await prisma.user.findUnique({
+    where: { email },
+    include: { tenant: true },
+  });
 
-  return null;
+  if (!user) return null;
+
+  const isValid = await bcrypt.compare(password, user.passwordHash);
+  if (!isValid) return null;
+
+  return {
+    id: user.id,
+    tenantId: user.tenantId ?? null,
+    email: user.email,
+    fullName: user.fullName,
+    role: toAuthRole(user.role),
+  };
 }
 
