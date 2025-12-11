@@ -37,32 +37,38 @@ enum TeamRole {
 }
 
 model Tenant {
-  id         String       @id @default(cuid())
-  slug       String       @unique
-  name       String
-  plan       BillingPlan  @default(DEV)
-  status     TenantStatus @default(ACTIVE)
-  createdAt  DateTime     @default(now())
-  updatedAt  DateTime     @updatedAt
+  id        String       @id @default(cuid())
+  slug      String       @unique
+  name      String
+  plan      BillingPlan  @default(DEV)
+  status    TenantStatus @default(ACTIVE)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
 
-  users    User[]
-  teams    Team[]
-  apiKeys  ApiKey[]
-  webhooks Webhook[]
+  users               User[]
+  teams               Team[]
+  apiKeys             ApiKey[]
+  webhooks            Webhook[]
+  tickets             Ticket[]
+  aiRules             AiRule[]
+  tenantBillingPlans  TenantBillingPlan[]
+  tenantQuotaUsages   TenantQuotaUsage[]
+  ticketBillingUsages TicketBillingUsage[]
 }
 
 model User {
-  id            String    @id @default(cuid())
-  tenant        Tenant?   @relation(fields: [tenantId], references: [id])
-  tenantId      String?
-  email         String    @unique
-  fullName      String
-  role          UserRole  @default(AGENT)
-  passwordHash  String
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  id           String   @id @default(cuid())
+  tenant       Tenant?  @relation(fields: [tenantId], references: [id])
+  tenantId     String?
+  email        String   @unique
+  fullName     String
+  role         UserRole @default(AGENT)
+  passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
-  teamMemberships TeamMembership[]
+  teamMemberships   TeamMembership[]
+  ticketAssignments TicketAssignment[]
 }
 
 model Team {
@@ -73,7 +79,8 @@ model Team {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  members TeamMembership[]
+  members           TeamMembership[]
+  ticketAssignments TicketAssignment[]
 }
 
 model TeamMembership {
@@ -87,26 +94,305 @@ model TeamMembership {
 }
 
 model ApiKey {
-  id         String   @id @default(cuid())
-  tenant     Tenant   @relation(fields: [tenantId], references: [id])
+  id         String    @id @default(cuid())
+  tenant     Tenant    @relation(fields: [tenantId], references: [id])
   tenantId   String
   name       String
   keyHash    String
   prefix     String
-  active     Boolean  @default(true)
-  createdAt  DateTime @default(now())
+  active     Boolean   @default(true)
+  createdAt  DateTime  @default(now())
   lastUsedAt DateTime?
 }
 
 model Webhook {
-  id             String   @id @default(cuid())
-  tenant         Tenant   @relation(fields: [tenantId], references: [id])
+  id             String    @id @default(cuid())
+  tenant         Tenant    @relation(fields: [tenantId], references: [id])
   tenantId       String
   name           String
   targetUrl      String
   eventTypes     String[]
-  isActive       Boolean  @default(true)
-  createdAt      DateTime @default(now())
+  isActive       Boolean   @default(true)
+  createdAt      DateTime  @default(now())
   lastDeliveryAt DateTime?
 }
 
+// ---------------------------
+// Tickets & Messaging
+// ---------------------------
+model Ticket {
+  id              String         @id @default(cuid())
+  tenant          Tenant         @relation(fields: [tenantId], references: [id])
+  tenantId        String
+  customerName    String
+  customerEmail   String?
+  externalId      String?
+  channel         TicketChannel
+  status          TicketStatus   @default(OPEN)
+  priority        TicketPriority @default(NORMAL)
+  subject         String
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  firstResponseAt DateTime?
+  resolvedAt      DateTime?
+
+  messages     TicketMessage[]
+  events       TicketEvent[]
+  assignments  TicketAssignment[]
+  aiDrafts     AiResponseDraft[]
+  billingUsage TicketBillingUsage?
+
+  category         String?
+  sentiment        String?
+  aiRuleExecutions AiRuleExecution[]
+}
+
+model TicketMessage {
+  id         String            @id @default(cuid())
+  ticket     Ticket            @relation(fields: [ticketId], references: [id])
+  ticketId   String
+  tenantId   String
+  senderType MessageSenderType
+  senderId   String?
+  senderName String?
+  sentAt     DateTime          @default(now())
+  body       String
+  isInternal Boolean           @default(false)
+  source     MessageSource
+}
+
+model TicketEvent {
+  id        String          @id @default(cuid())
+  ticket    Ticket          @relation(fields: [ticketId], references: [id])
+  ticketId  String
+  tenantId  String
+  type      TicketEventType
+  createdAt DateTime        @default(now())
+  actorType EventActorType
+  actorId   String?
+  payload   Json?
+}
+
+model TicketAssignment {
+  id        String   @id @default(cuid())
+  ticket    Ticket   @relation(fields: [ticketId], references: [id])
+  ticketId  String
+  tenantId  String
+  user      User?    @relation(fields: [userId], references: [id])
+  userId    String?
+  team      Team?    @relation(fields: [teamId], references: [id])
+  teamId    String?
+  createdAt DateTime @default(now())
+}
+
+enum TicketStatus {
+  OPEN
+  PENDING
+  WAITING_CUSTOMER
+  RESOLVED
+  ESCALATED
+  CLOSED
+}
+
+enum TicketPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum TicketChannel {
+  AMAZON
+  CDISCOUNT
+  FNAC
+  MANOMANO
+  RAKUTEN
+  VINTED
+  BACKMARKET
+  MANUAL
+  OTHER
+}
+
+enum MessageSenderType {
+  CUSTOMER
+  AGENT
+  AI
+  SYSTEM
+}
+
+enum MessageSource {
+  MARKETPLACE
+  KEYBUZZ_UI
+  API
+  AI
+  OTHER
+}
+
+enum TicketEventType {
+  MESSAGE_RECEIVED
+  MESSAGE_SENT
+  STATUS_CHANGED
+  PRIORITY_CHANGED
+  SLA_BREACHED
+  SLA_RESTORED
+  ASSIGNMENT_CHANGED
+  AI_SUGGESTION_CREATED
+  AI_REPLY_SENT
+  AI_RULE_EXECUTED
+  TICKET_AUTO_CLOSED
+}
+
+enum EventActorType {
+  CUSTOMER
+  AGENT
+  AI
+  SYSTEM
+}
+
+// ---------------------------
+// AI Rules & Executions
+// ---------------------------
+model AiRule {
+  id            String          @id @default(cuid())
+  tenant        Tenant          @relation(fields: [tenantId], references: [id])
+  tenantId      String
+  name          String
+  description   String?
+  isActive      Boolean         @default(true)
+  trigger       AiTriggerType
+  executionMode AiExecutionMode @default(SUGGEST_ONLY)
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  conditions AiRuleCondition[]
+  actions    AiRuleAction[]
+  executions AiRuleExecution[]
+}
+
+model AiRuleCondition {
+  id       String            @id @default(cuid())
+  rule     AiRule            @relation(fields: [ruleId], references: [id])
+  ruleId   String
+  field    String
+  operator ConditionOperator
+  value    String
+}
+
+model AiRuleAction {
+  id     String       @id @default(cuid())
+  rule   AiRule       @relation(fields: [ruleId], references: [id])
+  ruleId String
+  type   AiActionType
+  params Json?
+}
+
+model AiRuleExecution {
+  id          String            @id @default(cuid())
+  rule        AiRule            @relation(fields: [ruleId], references: [id])
+  ruleId      String
+  ticket      Ticket            @relation(fields: [ticketId], references: [id])
+  ticketId    String
+  tenantId    String
+  triggeredAt DateTime          @default(now())
+  result      AiExecutionResult
+  details     Json?
+}
+
+model AiResponseDraft {
+  id            String   @id @default(cuid())
+  ticket        Ticket   @relation(fields: [ticketId], references: [id])
+  ticketId      String
+  tenantId      String
+  createdAt     DateTime @default(now())
+  createdByRule String?
+  body          String
+  confidence    Float?
+  used          Boolean  @default(false)
+}
+
+enum AiTriggerType {
+  INCOMING_MESSAGE
+  NO_ANSWER_TIMEOUT
+  ORDER_ISSUE
+  RETURN_REQUEST
+  NEGATIVE_SENTIMENT
+}
+
+enum AiExecutionMode {
+  DISABLED
+  SUGGEST_ONLY
+  AUTO_EXECUTE
+}
+
+enum ConditionOperator {
+  EQUALS
+  NOT_EQUALS
+  CONTAINS
+  NOT_CONTAINS
+  IN
+  NOT_IN
+  GREATER_THAN
+  LESS_THAN
+}
+
+enum AiActionType {
+  SEND_REPLY
+  SET_STATUS
+  ADD_TAG
+  REQUEST_MORE_INFO
+  ESCALATE
+}
+
+enum AiExecutionResult {
+  SKIPPED
+  SUCCESS
+  FAILED
+}
+
+// ---------------------------
+// Billing & Quotas
+// ---------------------------
+model TenantBillingPlan {
+  id                  String      @id @default(cuid())
+  tenant              Tenant      @relation(fields: [tenantId], references: [id])
+  tenantId            String
+  plan                BillingPlan
+  ticketMonthlyQuota  Int
+  softLimitPercent    Int         @default(80)
+  hardLimitPercent    Int         @default(100)
+  autoRechargeEnabled Boolean     @default(true)
+  autoRechargeUnits   Int         @default(100)
+  ticketUnitPrice     Float       @default(0.0)
+  aiActionUnitPrice   Float       @default(0.0)
+  createdAt           DateTime    @default(now())
+  updatedAt           DateTime    @updatedAt
+}
+
+model TenantQuotaUsage {
+  id             String   @id @default(cuid())
+  tenant         Tenant   @relation(fields: [tenantId], references: [id])
+  tenantId       String
+  periodStart    DateTime
+  periodEnd      DateTime
+  ticketsCount   Int      @default(0)
+  aiActionsCount Int      @default(0)
+  autoRecharges  Int      @default(0)
+  lastUpdatedAt  DateTime @default(now())
+}
+
+model TicketBillingUsage {
+  id                 String   @id @default(cuid())
+  tenant             Tenant   @relation(fields: [tenantId], references: [id])
+  tenantId           String
+  ticket             Ticket   @relation(fields: [ticketId], references: [id])
+  ticketId           String   @unique
+  aiActionsCount     Int      @default(0)
+  humanMessagesCount Int      @default(0)
+  autoReplyCount     Int      @default(0)
+  tokensUsed         Int      @default(0)
+  billableUnits      Int      @default(0)
+  calculatedAmount   Float    @default(0.0)
+  finalized          Boolean  @default(false)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
