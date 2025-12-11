@@ -1,12 +1,9 @@
-import { Pool } from "pg";
-import { env } from "../config/env";
+import { PrismaClient } from "@prisma/client";
 
-export const db = new Pool({
-  connectionString: env.DATABASE_URL,
-});
+export const prisma = new PrismaClient();
 
 export async function testDbConnection(): Promise<boolean> {
-  const res = await db.query("SELECT 1 as ok");
-  return res.rows[0]?.ok === 1;
+  const res = await prisma.$queryRaw<{ ok: number }[]>`SELECT 1 as ok`;
+  return Array.isArray(res) && res[0]?.ok === 1;
 }
 

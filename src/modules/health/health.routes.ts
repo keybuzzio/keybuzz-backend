@@ -12,9 +12,12 @@ export function registerHealthRoutes(app: FastifyInstance) {
     };
   });
 
-  app.get("/health/db", async () => {
+  app.get("/health/db", async (_request, reply) => {
     const ok = await testDbConnection();
-    return ok ? { status: "ok" } : { status: "error" };
+    if (!ok) {
+      return reply.code(500).send({ status: "error" });
+    }
+    return { status: "ok" };
   });
 }
 
