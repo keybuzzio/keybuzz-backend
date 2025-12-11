@@ -8,6 +8,8 @@ import { logger } from "./config/logger";
 import { registerHealthRoutes } from "./modules/health/health.routes";
 import { registerTenantRoutes } from "./modules/tenants/tenants.routes";
 import { registerAuthRoutes } from "./modules/auth/auth.routes";
+import { registerTicketRoutes } from "./modules/tickets/tickets.routes";
+import { registerTicketMessageRoutes } from "./modules/tickets/messages.routes";
 
 async function bootstrap() {
   const app = Fastify({ logger: true });
@@ -31,6 +33,8 @@ async function bootstrap() {
   registerHealthRoutes(app);
   registerTenantRoutes(app);
   registerAuthRoutes(app);
+  registerTicketRoutes(app);
+  registerTicketMessageRoutes(app);
 
   try {
     await app.listen({ port: env.PORT, host: "0.0.0.0" });
