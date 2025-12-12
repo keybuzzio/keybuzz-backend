@@ -111,7 +111,13 @@ export async function evaluateAiRulesForTicket(
   // Pour chaque règle matchée, exécuter l'IA (mock) et logguer brouillon + exécution
   for (const rule of matchedRules) {
     try {
-      const outcome = await runAiForTicket(ticket.id, userContext);
+      const outcome = await runAiForTicket({
+        ticketId: ticket.id,
+        userContext,
+        ruleId: rule.id,
+        mode,
+        taskType: "draft_reply",
+      });
 
       if (outcome.draftReply) {
         // Création d'un AiResponseDraft lié au ticket

@@ -396,3 +396,36 @@ model TicketBillingUsage {
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 }
+
+// ---------------------------
+// AI Cost & Usage (PH11-05C.1)
+// ---------------------------
+model AiUsageLog {
+  id            String   @id @default(cuid())
+  tenantId      String
+  ticketId      String?
+  ruleId        String?
+  provider      String
+  model         String
+  taskType      String
+  tokensInput   Int
+  tokensOutput  Int
+  estimatedCost Int      // en centimes
+  latencyMs     Int
+  createdAt     DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+}
+
+model TenantAiBudget {
+  tenantId                 String  @id
+  monthlyBudgetCents       Int
+  softLimitPercent         Int
+  downgradePercent         Int
+  hardLimitPercent         Int
+  autoRechargeEnabled      Boolean
+  autoRechargeAmountCents  Int
+  maxAutoRechargesPerMonth Int
+  maxAutoRechargesPerDay   Int
+  createdAt                DateTime @default(now())
+}

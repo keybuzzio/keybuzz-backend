@@ -208,6 +208,45 @@ async function main() {
       value: "AMAZON",
     },
   });
+
+  // Budgets IA par tenant
+  const defaultBudget = {
+    monthlyBudgetCents: 5000, // 50€
+    softLimitPercent: 70,
+    downgradePercent: 85,
+    hardLimitPercent: 100,
+    autoRechargeEnabled: true,
+    autoRechargeAmountCents: 1000, // 10€
+    maxAutoRechargesPerMonth: 10,
+    maxAutoRechargesPerDay: 2,
+  };
+
+  await prisma.tenantAiBudget.upsert({
+    where: { tenantId: tenant1.id },
+    update: {},
+    create: {
+      tenantId: tenant1.id,
+      ...defaultBudget,
+    },
+  });
+
+  await prisma.tenantAiBudget.upsert({
+    where: { tenantId: tenant2.id },
+    update: {},
+    create: {
+      tenantId: tenant2.id,
+      ...defaultBudget,
+    },
+  });
+
+  await prisma.tenantAiBudget.upsert({
+    where: { tenantId: tenant3.id },
+    update: {},
+    create: {
+      tenantId: tenant3.id,
+      ...defaultBudget,
+    },
+  });
 }
 
 main()

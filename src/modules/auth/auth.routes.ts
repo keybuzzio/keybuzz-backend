@@ -7,8 +7,21 @@ interface LoginBody {
 }
 
 export function registerAuthRoutes(app: FastifyInstance) {
-  app.post<{ Body: LoginBody }>("/api/v1/auth/login", async (request, reply) => {
-    const { email, password } = request.body;
+  app.post("/api/v1/auth/login", async (request, reply) => {
+    // Try to parse body manually if needed
+    let body: LoginBody;
+    try {
+      body = request.body as LoginBody;
+    } catch {
+      return reply.code(400).send({ error: "Invalid request body" });
+    }
+
+    const { email, password } = body || {};
+    
+    if (!email || !password) {
+      return reply.code(400).send({ error: "email and password required" });
+    }
+
     const user = await loginWithEmailPassword(email, password);
 
     if (!user) {

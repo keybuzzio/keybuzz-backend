@@ -10,7 +10,11 @@ export function registerAiTestRoutes(app: FastifyInstance) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     async (request: any) => {
       const { ticketId } = request.params as { ticketId: string };
-      const outcome = await runAiForTicket(ticketId, request.user);
+      const outcome = await runAiForTicket({
+        ticketId,
+        userContext: request.user,
+        taskType: "draft_reply",
+      });
       return { data: outcome };
     }
   );
