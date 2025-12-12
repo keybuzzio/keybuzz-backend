@@ -16,6 +16,7 @@ const envSchema = z.object({
   JWT_SECRET: z.string().min(1).default("CHANGE_ME_SECRET"),
   KEYBUZZ_SUPERADMIN_EMAIL: z.string().email().default("admin@keybuzz.io"),
   KEYBUZZ_SUPERADMIN_PASSWORD: z.string().min(1).default("change-me"),
+  KEYBUZZ_AI_PROVIDER: z.string().optional().default("mock"),
 });
 
 const parsed = envSchema.safeParse(process.env);

@@ -10,9 +10,13 @@ import { registerTenantRoutes } from "./modules/tenants/tenants.routes";
 import { registerAuthRoutes } from "./modules/auth/auth.routes";
 import { registerTicketRoutes } from "./modules/tickets/tickets.routes";
 import { registerTicketMessageRoutes } from "./modules/tickets/messages.routes";
+import { registerAiTestRoutes } from "./modules/ai/ai.routes";
 
 async function bootstrap() {
-  const app = Fastify({ logger: true });
+  const app = Fastify({ 
+    logger: true,
+    bodyLimit: 1048576, // 1MB
+  });
 
   await app.register(cors);
   await app.register(helmet);
@@ -35,6 +39,7 @@ async function bootstrap() {
   registerAuthRoutes(app);
   registerTicketRoutes(app);
   registerTicketMessageRoutes(app);
+  registerAiTestRoutes(app);
 
   try {
     await app.listen({ port: env.PORT, host: "0.0.0.0" });
