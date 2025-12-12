@@ -1,5 +1,6 @@
 import { prisma } from "../../lib/db";
 import type { AuthUser } from "../auth/auth.types";
+import { evaluateAiRulesForTicket } from "../ai/aiRules.service";
 
 // Squelettes pour PH11-04C : messages + événements + billing + SLA/IA.
 
@@ -62,6 +63,11 @@ export async function addMessageToTicket(
       humanMessagesCount: 1,
     },
   });
+
+  // Déclencher l'évaluation des règles IA si c'est un message entrant (client)
+  if (!isInternal) {
+    await evaluateAiRulesForTicket(ticketId, "INCOMING_MESSAGE", user);
+  }
 
   return message;
 }
