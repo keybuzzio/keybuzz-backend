@@ -28,9 +28,6 @@ export interface RunAiInput {
 
 /**
  * Exécute une étape IA pour un ticket donné (ex: classification ou suggestion de réponse).
- * Pour l'instant, ne fait qu'un appel mock qui renvoie un brouillon générique.
- * Plus tard (PH11-05B/C), on utilisera vraiment le ticket, le dernier message,
- * la langue, le tenant, les règles, etc.
  */
 export async function runAiForTicket(params: RunAiInput): Promise<AiExecutionOutcome> {
   const {
@@ -41,8 +38,6 @@ export async function runAiForTicket(params: RunAiInput): Promise<AiExecutionOut
     taskType = "draft_reply",
   } = params;
 
-  // TODO: en PH11-05B/C, charger le ticket, les messages, le tenant, les rules, etc.
-  // Pour l'instant, on vérifie juste que le ticket existe (ou on ignore silencieusement).
   const ticket = await prisma.ticket.findUnique({
     where: { id: ticketId },
   });
@@ -60,7 +55,7 @@ export async function runAiForTicket(params: RunAiInput): Promise<AiExecutionOut
   }
 
   const budgetPressure = await getBudgetPressure(ticket.tenantId);
-  const model = selectModelForTask({
+  const selectedModel = selectModelForTask({
     taskType,
     mode,
     budgetPressure,
@@ -69,9 +64,9 @@ export async function runAiForTicket(params: RunAiInput): Promise<AiExecutionOut
   const prompt = buildBasicPromptForTicket(ticket.id);
 
   const estimatedTokensInput = estimateTokens(prompt);
-  const estimatedTokensOutput = 200; // estimation simple pour le mock
+  const estimatedTokensOutput = 200; // estimation simple
   const estimatedCost = estimateCostCents({
-    model,
+    model: selectedModel,
     tokensInput: estimatedTokensInput,
     tokensOutput: estimatedTokensOutput,
   });
@@ -97,7 +92,7 @@ export async function runAiForTicket(params: RunAiInput): Promise<AiExecutionOut
 
   const startedAt = Date.now();
   const providerResponse = await generateReply({
-    model,
+    model: selectedModel,
     prompt,
     maxTokens: 400,
     temperature: 0.2,
@@ -105,10 +100,13 @@ export async function runAiForTicket(params: RunAiInput): Promise<AiExecutionOut
   });
   const latencyMs = Date.now() - startedAt;
 
-  const tokensOutput = providerResponse.tokensUsed ?? estimatedTokensOutput;
+  // Utiliser les tokens réels si disponibles, sinon fallback sur estimation
+  const tokensInput = providerResponse.tokensInput ?? estimatedTokensInput;
+  const tokensOutput = providerResponse.tokensOutput ?? estimatedTokensOutput;
+  
   const finalCost = estimateCostCents({
-    model,
-    tokensInput: estimatedTokensInput,
+    model: selectedModel,
+    tokensInput,
     tokensOutput,
   });
 
@@ -117,9 +115,9 @@ export async function runAiForTicket(params: RunAiInput): Promise<AiExecutionOut
     ticketId: ticket.id,
     ruleId,
     provider: "litellm",
-    model,
+    model: selectedModel,
     taskType,
-    tokensInput: estimatedTokensInput,
+    tokensInput,
     tokensOutput,
     estimatedCost: finalCost,
     latencyMs,

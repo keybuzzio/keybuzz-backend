@@ -17,6 +17,8 @@ const envSchema = z.object({
   KEYBUZZ_SUPERADMIN_EMAIL: z.string().email().default("admin@keybuzz.io"),
   KEYBUZZ_SUPERADMIN_PASSWORD: z.string().min(1).default("change-me"),
   KEYBUZZ_AI_PROVIDER: z.string().optional().default("mock"),
+  KEYBUZZ_AI_BASE_URL: z.string().url().optional(),
+  KEYBUZZ_AI_API_KEY: z.string().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);
