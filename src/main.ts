@@ -11,6 +11,7 @@ import { registerAuthRoutes } from "./modules/auth/auth.routes";
 import { registerTicketRoutes } from "./modules/tickets/tickets.routes";
 import { registerTicketMessageRoutes } from "./modules/tickets/messages.routes";
 import { registerAiTestRoutes } from "./modules/ai/ai.routes";
+import { registerMarketplaceRoutes } from "./modules/marketplaces/marketplaces.routes";
 
 async function bootstrap() {
   const app = Fastify({ 
@@ -40,6 +41,7 @@ async function bootstrap() {
   registerTicketRoutes(app);
   registerTicketMessageRoutes(app);
   registerAiTestRoutes(app);
+  await registerMarketplaceRoutes(app);
 
   try {
     await app.listen({ port: env.PORT, host: "0.0.0.0" });

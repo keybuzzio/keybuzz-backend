@@ -429,3 +429,75 @@ model TenantAiBudget {
   maxAutoRechargesPerDay   Int
   createdAt                DateTime @default(now())
 }
+
+// ---------------------------
+// Marketplace Integrations (PH11-06A)
+// ---------------------------
+
+enum MarketplaceType {
+  AMAZON
+  FNAC
+  CDISCOUNT
+  OTHER
+}
+
+enum MarketplaceConnectionStatus {
+  PENDING
+  CONNECTED
+  ERROR
+  DISABLED
+}
+
+model MarketplaceConnection {
+  id            String                      @id @default(cuid())
+  tenantId      String
+  type          MarketplaceType
+  status        MarketplaceConnectionStatus @default(PENDING)
+  displayName   String?
+  region        String? // ex: "EU", "NA"
+  marketplaceId String? // ex: Amazon marketplace id
+  vaultPath     String? // Référence du secret dans Vault (path)
+  lastSyncAt    DateTime?
+  lastError     String?
+  createdAt     DateTime                    @default(now())
+  updatedAt     DateTime                    @updatedAt
+
+  @@index([tenantId, type])
+}
+
+model MarketplaceSyncState {
+  id            String          @id @default(cuid())
+  connectionId  String
+  tenantId      String
+  type          MarketplaceType
+  cursor        String? // token/cursor Amazon si dispo
+  lastPolledAt  DateTime?
+  lastSuccessAt DateTime?
+  lastError     String?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  @@index([tenantId, type])
+  @@index([connectionId])
+}
+
+model ExternalMessage {
+  id           String          @id @default(cuid())
+  tenantId     String
+  connectionId String
+  type         MarketplaceType
+  externalId   String // unique id message Amazon
+  threadId     String? // id conversation Amazon
+  orderId      String? // order id Amazon si présent
+  buyerName    String?
+  buyerEmail   String?
+  language     String?
+  receivedAt   DateTime
+  raw          Json
+  ticketId     String? // mapping KeyBuzz
+  createdAt    DateTime        @default(now())
+
+  @@unique([type, connectionId, externalId])
+  @@index([tenantId, receivedAt])
+  @@index([ticketId])
+}

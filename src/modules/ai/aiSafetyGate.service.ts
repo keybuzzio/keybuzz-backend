@@ -2,7 +2,7 @@
 
 import { prisma } from "../../lib/db";
 import { env } from "../../config/env";
-import type { Ticket, TicketMessage, AiRule } from "@prisma/client";
+import type { Ticket, TicketMessage } from "@prisma/client";
 
 /**
  * Keywords sensibles qui bloquent l'auto-send
