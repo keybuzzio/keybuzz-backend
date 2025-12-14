@@ -19,6 +19,19 @@ const envSchema = z.object({
   KEYBUZZ_AI_PROVIDER: z.string().optional().default("mock"),
   KEYBUZZ_AI_BASE_URL: z.string().url().optional(),
   KEYBUZZ_AI_API_KEY: z.string().optional(),
+  
+  // PH11-05D.3: Auto-send AI replies (feature flags)
+  KEYBUZZ_AI_AUTOSEND_ENABLED: z.string().default("false"),
+  KEYBUZZ_AI_AUTOSEND_MAX_PER_TICKET: z
+    .string()
+    .default("3")
+    .transform((val) => Number(val))
+    .pipe(z.number().int().positive()),
+  KEYBUZZ_AI_AUTOSEND_COOLDOWN_MINUTES: z
+    .string()
+    .default("10")
+    .transform((val) => Number(val))
+    .pipe(z.number().int().positive()),
 });
 
 const parsed = envSchema.safeParse(process.env);

@@ -17,6 +17,7 @@ import {
   incrementTicketBillingUsage,
   updateTenantQuotaUsage,
 } from "../billing/billingUsage.service";
+import { isAutoSendAllowed } from "./aiSafetyGate.service";
 
 /**
  * Évalue les règles IA pour un ticket donné et exécute l'IA si des règles matchent.
@@ -119,9 +120,11 @@ export async function evaluateAiRulesForTicket(
         taskType: "draft_reply",
       });
 
+      let draftId: string | null = null;
+
       if (outcome.draftReply) {
         // Création d'un AiResponseDraft lié au ticket
-        await prisma.aiResponseDraft.create({
+        const draft = await prisma.aiResponseDraft.create({
           data: {
             ticketId: ticket.id,
             tenantId: ticket.tenantId,
@@ -130,6 +133,7 @@ export async function evaluateAiRulesForTicket(
             confidence: null, // on mettra confiance réelle plus tard
           },
         });
+        draftId = draft.id;
       }
 
       await prisma.aiRuleExecution.create({
@@ -168,7 +172,14 @@ export async function evaluateAiRulesForTicket(
       );
 
       for (const action of allowedActions) {
-        await applyAiAction(ticket, rule.id, action.type, action.params);
+        await applyAiAction(
+          ticket,
+          rule,
+          action.type,
+          action.params,
+          outcome.draftReply,
+          draftId
+        );
       }
     } catch (err) {
       // Loggue l'échec en DB pour debug futur
@@ -247,10 +258,12 @@ function evaluateCondition(
  * Applique une action IA sur un ticket.
  */
 async function applyAiAction(
-  ticket: { id: string; tenantId: string; status: string; priority: string },
-  ruleId: string,
+  ticket: { id: string; tenantId: string; status: string; priority: string; channel: string },
+  rule: { id: string; executionMode: string | null },
   actionType: AiActionType,
-  params?: unknown
+  params?: unknown,
+  draftReply?: string,
+  draftId?: string | null
 ): Promise<void> {
   if (actionType === "SET_STATUS") {
     const nextStatus = (params as { status?: string })?.status as string | undefined;
@@ -266,8 +279,8 @@ async function applyAiAction(
         tenantId: ticket.tenantId,
         type: "STATUS_CHANGED",
         actorType: "AI",
-        actorId: ruleId,
-        payload: { from: ticket.status, to: statusUpper, ruleId },
+        actorId: rule.id,
+        payload: { from: ticket.status, to: statusUpper, ruleId: rule.id },
       });
     }
   } else if (actionType === "ESCALATE") {
@@ -281,8 +294,8 @@ async function applyAiAction(
       tenantId: ticket.tenantId,
       type: "PRIORITY_CHANGED",
       actorType: "AI",
-      actorId: ruleId,
-      payload: { to: "HIGH", ruleId },
+      actorId: rule.id,
+      payload: { to: "HIGH", ruleId: rule.id },
     });
 
     await createTicketEvent({
@@ -290,8 +303,8 @@ async function applyAiAction(
       tenantId: ticket.tenantId,
       type: "STATUS_CHANGED",
       actorType: "AI",
-      actorId: ruleId,
-      payload: { from: ticket.status, to: "ESCALATED", ruleId },
+      actorId: rule.id,
+      payload: { from: ticket.status, to: "ESCALATED", ruleId: rule.id },
     });
   } else if (actionType === "ADD_TAG") {
     const tag = (params as { tag?: string })?.tag;
@@ -302,10 +315,91 @@ async function applyAiAction(
       tenantId: ticket.tenantId,
       type: "AI_RULE_EXECUTED",
       actorType: "AI",
-      actorId: ruleId,
-      payload: { action: "ADD_TAG", tag, ruleId },
+      actorId: rule.id,
+      payload: { action: "ADD_TAG", tag, ruleId: rule.id },
     });
+  } else if (actionType === "SEND_REPLY") {
+    // PH11-05D.3: Auto-send avec safety gate
+    if (!draftReply) {
+      return; // Pas de draft, rien à envoyer
+    }
+
+    // Récupérer le dernier message du ticket
+    const lastMessage = await prisma.ticketMessage.findFirst({
+      where: { ticketId: ticket.id },
+      orderBy: { sentAt: "desc" },
+    });
+
+    // Récupérer le mode tenant
+    const mode = await getTenantAiMode(ticket.tenantId);
+
+    // Vérifier avec le safety gate
+    const fullTicket = await prisma.ticket.findUnique({
+      where: { id: ticket.id },
+    });
+    if (!fullTicket) return;
+
+    const safetyCheck = await isAutoSendAllowed({
+      ticket: fullTicket,
+      lastMessage,
+      tenantMode: mode,
+      rule,
+      draftReply,
+    });
+
+    if (safetyCheck.allowed) {
+      // Créer le TicketMessage AI
+      await prisma.ticketMessage.create({
+        data: {
+          ticketId: ticket.id,
+          tenantId: ticket.tenantId,
+          senderType: "AI",
+          senderId: null, // AI n'a pas d'userId
+          senderName: "KeyBuzz AI",
+          body: draftReply,
+          isInternal: false,
+          source: "AI",
+        },
+      });
+
+      // Marquer le draft comme utilisé
+      if (draftId) {
+        await prisma.aiResponseDraft.update({
+          where: { id: draftId },
+          data: { used: true },
+        });
+      }
+
+      // Event AI_REPLY_SENT
+      await createTicketEvent({
+        ticketId: ticket.id,
+        tenantId: ticket.tenantId,
+        type: "AI_REPLY_SENT",
+        actorType: "AI",
+        actorId: rule.id,
+        payload: { ruleId: rule.id, draftId, autoSent: true },
+      });
+
+      // Incrémenter le billing (auto-reply count)
+      await incrementTicketBillingUsage(ticket.id, ticket.tenantId, {
+        autoReply: 1,
+      });
+    } else {
+      // Blocked: créer event avec raison
+      await createTicketEvent({
+        ticketId: ticket.id,
+        tenantId: ticket.tenantId,
+        type: "AI_RULE_EXECUTED",
+        actorType: "SYSTEM",
+        actorId: rule.id,
+        payload: {
+          outcome: "blocked_autosend",
+          reason: safetyCheck.reason,
+          ruleId: rule.id,
+        },
+      });
+    }
   }
-  // SEND_REPLY et REQUEST_MORE_INFO ne sont pas appliqués automatiquement en PH11-05C
+  // REQUEST_MORE_INFO non implémenté pour l'instant
 }
 
