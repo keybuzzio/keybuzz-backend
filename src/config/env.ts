@@ -32,6 +32,17 @@ const envSchema = z.object({
     .default("10")
     .transform((val) => Number(val))
     .pipe(z.number().int().positive()),
+  
+  // PH11-06B: Amazon SP-API OAuth
+  AMAZON_SPAPI_CLIENT_ID: z.string().optional(),
+  AMAZON_SPAPI_CLIENT_SECRET: z.string().optional(),
+  AMAZON_SPAPI_REDIRECT_URI: z.string().url().optional(),
+  AMAZON_SPAPI_LWA_OAUTH_URL: z.string().url().default("https://api.amazon.com/auth/o2/token"),
+  AMAZON_SPAPI_APP_ID: z.string().optional(),
+  
+  // Vault
+  VAULT_ADDR: z.string().url().optional(),
+  VAULT_TOKEN: z.string().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);

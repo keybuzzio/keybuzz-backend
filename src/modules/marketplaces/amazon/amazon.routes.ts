@@ -7,6 +7,7 @@ import { ensureAmazonConnection } from "./amazon.service";
 import { pollAmazonForTenant } from "./amazon.poller";
 import { MarketplaceType } from "@prisma/client";
 import type { AuthUser } from "../../auth/auth.types";
+import { generateAmazonOAuthUrl, completeAmazonOAuth } from "./amazon.oauth";
 
 export async function registerAmazonRoutes(server: FastifyInstance) {
   /**
@@ -48,11 +49,11 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
   );
 
   /**
-   * POST /api/v1/marketplaces/amazon/connect
-   * Placeholder for self-serve connect (OAuth in PH11-06B)
+   * POST /api/v1/marketplaces/amazon/oauth/start
+   * Start Amazon OAuth flow (self-serve)
    */
   server.post(
-    "/api/v1/marketplaces/amazon/connect",
+    "/api/v1/marketplaces/amazon/oauth/start",
     async (request: FastifyRequest, reply) => {
       const user = (request as FastifyRequest & { user: AuthUser }).user;
       
@@ -60,25 +61,17 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
         return reply.status(401).send({ error: "Unauthorized" });
       }
 
-      // TODO PH11-06B: Implement OAuth flow
-      // For now, create/update connection as PENDING
+      try {
+        // Ensure connection exists (create if needed)
+        const existing = await prisma.marketplaceConnection.findFirst({
+          where: {
+            tenantId: user.tenantId,
+            type: MarketplaceType.AMAZON,
+          },
+        });
 
-      const existing = await prisma.marketplaceConnection.findFirst({
-        where: {
-          tenantId: user.tenantId,
-          type: MarketplaceType.AMAZON,
-        },
-      });
-
-      const connection = existing
-        ? await prisma.marketplaceConnection.update({
-            where: { id: existing.id },
-            data: {
-              status: "PENDING",
-              updatedAt: new Date(),
-            },
-          })
-        : await prisma.marketplaceConnection.create({
+        if (!existing) {
+          await prisma.marketplaceConnection.create({
             data: {
               tenantId: user.tenantId,
               type: MarketplaceType.AMAZON,
@@ -86,14 +79,23 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
               displayName: "Amazon",
             },
           });
+        }
 
-      return reply.send({
-        message: "Amazon connection initiated",
-        status: "pending",
-        instructions:
-          "OAuth flow will be implemented in PH11-06B. For now, connection is marked as PENDING.",
-        connectionId: connection.id,
-      });
+        // Generate OAuth URL
+        const oauthData = await generateAmazonOAuthUrl(user.tenantId);
+
+        return reply.send({
+          authUrl: oauthData.authUrl,
+          expiresAt: oauthData.expiresAt,
+          message: "Redirect user to authUrl to authorize Amazon connection",
+        });
+      } catch (error) {
+        console.error("[Amazon OAuth] Error starting OAuth:", error);
+        return reply.status(500).send({
+          error: "Failed to start Amazon OAuth",
+          details: (error as Error).message,
+        });
+      }
     }
   );
 
@@ -140,13 +142,81 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
 
   /**
    * GET /api/v1/marketplaces/amazon/oauth/callback
-   * Placeholder Amazon OAuth callback (PH11-06B prereq)
-   * Simple endpoint to allow registering redirect_uri in Amazon Developer Console
+   * Amazon OAuth callback (handles redirect from Amazon)
    */
   server.get(
     "/api/v1/marketplaces/amazon/oauth/callback",
-    async (_request, reply) => {
-      return reply.code(200).send("Amazon OAuth callback ready");
+    async (request, reply) => {
+      const query = request.query as {
+        code?: string;
+        state?: string;
+        selling_partner_id?: string;
+        spapi_oauth_code?: string;
+        error?: string;
+        error_description?: string;
+      };
+
+      // Check for errors from Amazon
+      if (query.error) {
+        console.error(
+          `[Amazon OAuth] Authorization failed: ${query.error} - ${query.error_description}`
+        );
+        return reply.status(400).send({
+          error: "Amazon authorization failed",
+          details: query.error_description || query.error,
+        });
+      }
+
+      // Amazon sends both 'code' (LWA) and 'spapi_oauth_code' (SP-API)
+      const authCode = query.spapi_oauth_code || query.code;
+      const state = query.state;
+      const sellingPartnerId = query.selling_partner_id;
+
+      if (!authCode || !state || !sellingPartnerId) {
+        return reply.status(400).send({
+          error: "Missing required OAuth parameters",
+          details: "code, state, or selling_partner_id missing",
+        });
+      }
+
+      try {
+        // Extract tenantId from state (format: <uuid>-<tenantId>)
+        // For now, we need to find the tenant by state lookup
+        const syncState = await prisma.marketplaceSyncState.findFirst({
+          where: {
+            cursor: state,
+            type: MarketplaceType.AMAZON,
+          },
+        });
+
+        if (!syncState) {
+          return reply.status(400).send({
+            error: "Invalid or expired state",
+            details: "OAuth state not found or expired",
+          });
+        }
+
+        // Complete OAuth flow
+        await completeAmazonOAuth({
+          tenantId: syncState.tenantId,
+          code: authCode,
+          state,
+          sellingPartnerId,
+        });
+
+        // Success: redirect to success page or return JSON
+        return reply.send({
+          success: true,
+          message: "Amazon connection successful",
+          sellingPartnerId,
+        });
+      } catch (error) {
+        console.error("[Amazon OAuth] Callback error:", error);
+        return reply.status(500).send({
+          error: "Failed to complete Amazon OAuth",
+          details: (error as Error).message,
+        });
+      }
     }
   );
 }

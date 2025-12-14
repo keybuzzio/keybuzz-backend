@@ -37,8 +37,8 @@ async function runLoop() {
     console.log(
       `[Amazon Polling Worker] Waiting ${POLL_INTERVAL_SECONDS}s before next poll...`
     );
-    // eslint-disable-next-line no-undef
     await new Promise((resolve) =>
+      // eslint-disable-next-line no-undef
       setTimeout(resolve, POLL_INTERVAL_SECONDS * 1000)
     );
   }
