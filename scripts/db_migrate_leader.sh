@@ -49,8 +49,10 @@ if [ -n "${DB_LEADER_IP:-}" ]; then
     LEADER_IP="$DB_LEADER_IP"
     log "Using DB_LEADER_IP from env: $LEADER_IP"
 else
-    # Method 2: Try common Patroni/PostgreSQL IPs
-    CANDIDATE_IPS=("10.0.0.122" "10.0.0.123" "10.0.0.124" "10.0.0.125")
+    # Method 2: Try PostgreSQL nodes ONLY (from servers.tsv ROLE=db SUBROLE=postgres)
+    # db-master-01: 10.0.0.120, db-slave-01: 10.0.0.121, db-slave-02: 10.0.0.122
+    # Redis nodes (10.0.0.123-125) are NOT PostgreSQL and should NEVER be tested here
+    CANDIDATE_IPS=("10.0.0.120" "10.0.0.121" "10.0.0.122")
     LEADER_IP=""
     
     for ip in "${CANDIDATE_IPS[@]}"; do
