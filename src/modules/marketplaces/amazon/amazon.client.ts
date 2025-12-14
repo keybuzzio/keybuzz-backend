@@ -5,6 +5,8 @@ import type {
   AmazonFetchResult,
   AmazonFetchParams,
 } from "./amazon.types";
+import { fetchBuyerMessages } from "./amazon.spapi";
+import { getAmazonTenantCredentials } from "./amazon.vault";
 
 /**
  * Interface client Amazon SP-API
@@ -98,11 +100,102 @@ export class AmazonClientMock implements AmazonClient {
 }
 
 /**
- * Factory pour créer le bon client selon l'environnement
- * TODO PH11-06B: Ajouter AmazonClientReal
+ * Real Amazon SP-API client (PH11-06B)
  */
-export function createAmazonClient(): AmazonClient {
-  // Pour PH11-06A, toujours retourner le mock
-  return new AmazonClientMock();
+export class AmazonClientReal implements AmazonClient {
+  constructor(
+    private tenantId: string,
+    private refreshToken: string,
+    private roleArn: string,
+    private region: string,
+    private marketplaceId: string
+  ) {}
+
+  async fetchInboundMessages(
+    params: AmazonFetchParams
+  ): Promise<AmazonFetchResult> {
+    try {
+      const messages = await fetchBuyerMessages({
+        refreshToken: this.refreshToken,
+        roleArn: this.roleArn,
+        region: this.region,
+        marketplaceId: this.marketplaceId,
+        since: params.since,
+      });
+
+      return {
+        messages,
+        nextCursor: undefined, // SP-API pagination will be added later
+      };
+    } catch (error) {
+      console.error(
+        `[Amazon Client Real] Error fetching messages for tenant ${this.tenantId}:`,
+        error
+      );
+      throw error;
+    }
+  }
+}
+
+/**
+ * Factory pour créer le bon client selon l'environnement et credentials
+ */
+export async function createAmazonClient(
+  tenantId: string,
+  useMock = false
+): Promise<AmazonClient> {
+  if (useMock) {
+    return new AmazonClientMock();
+  }
+
+  // Get tenant credentials from Vault
+  const credentials = await getAmazonTenantCredentials(tenantId);
+
+  if (!credentials) {
+    console.warn(
+      `[Amazon Client] No credentials found for tenant ${tenantId}, using mock`
+    );
+    return new AmazonClientMock();
+  }
+
+  // Get app credentials to get role_arn and region
+  const vaultAddr = process.env.VAULT_ADDR;
+  const vaultToken = process.env.VAULT_TOKEN;
+
+  if (!vaultAddr || !vaultToken) {
+    console.warn("[Amazon Client] Vault not configured, using mock");
+    return new AmazonClientMock();
+  }
+
+  // Fetch app config from Vault to get role_arn
+   
+  const appSource = process.env.AMAZON_SPAPI_APP_SOURCE || "external_test";
+  const vaultPath =
+    appSource === "keybuzz"
+      ? "secret/data/keybuzz/ai/amazon_spapi_app"
+      : "secret/data/keybuzz/ai/amazon_spapi_app_temp";
+
+  // eslint-disable-next-line no-undef
+  const response = await fetch(`${vaultAddr}/v1/${vaultPath}`, {
+    headers: { "X-Vault-Token": vaultToken },
+  });
+
+  if (!response.ok) {
+    console.warn(
+      `[Amazon Client] Failed to fetch app config from Vault, using mock`
+    );
+    return new AmazonClientMock();
+  }
+
+  const appData = await response.json();
+  const roleArn = appData.data.data.role_arn;
+
+  return new AmazonClientReal(
+    tenantId,
+    credentials.refresh_token,
+    roleArn,
+    credentials.region,
+    credentials.marketplace_id
+  );
 }
 
