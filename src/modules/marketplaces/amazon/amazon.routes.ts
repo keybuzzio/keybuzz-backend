@@ -137,5 +137,17 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
       });
     }
   );
+
+  /**
+   * GET /api/v1/marketplaces/amazon/oauth/callback
+   * Placeholder Amazon OAuth callback (PH11-06B prereq)
+   * Simple endpoint to allow registering redirect_uri in Amazon Developer Console
+   */
+  server.get(
+    "/api/v1/marketplaces/amazon/oauth/callback",
+    async (_request, reply) => {
+      return reply.code(200).send("Amazon OAuth callback ready");
+    }
+  );
 }
 
