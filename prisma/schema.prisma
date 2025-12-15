@@ -225,6 +225,7 @@ enum MessageSource {
   KEYBUZZ_UI
   API
   AI
+  EMAIL
   OTHER
 }
 
@@ -500,4 +501,78 @@ model ExternalMessage {
   @@unique([type, connectionId, externalId])
   @@index([tenantId, receivedAt])
   @@index([ticketId])
+}
+
+// ---------------------------
+// Outbound Email (PH11-06B.3)
+// ---------------------------
+
+enum OutboundEmailProvider {
+  SMTP
+  SES
+}
+
+enum OutboundEmailStatus {
+  PENDING
+  SENT
+  FAILED
+  RETRYING
+}
+
+model OutboundEmail {
+  id        String                 @id @default(cuid())
+  tenantId  String
+  ticketId  String
+  to        String
+  from      String
+  subject   String
+  body      String                 @db.Text
+  provider  OutboundEmailProvider?
+  status    OutboundEmailStatus    @default(PENDING)
+  error     String?                @db.Text
+  sentAt    DateTime?
+  createdAt DateTime               @default(now())
+  updatedAt DateTime               @updatedAt
+
+  @@index([tenantId, ticketId])
+  @@index([status, createdAt])
+  @@index([tenantId, createdAt])
+}
+
+// ---------------------------
+// Job Queue (PH11-06C)
+// ---------------------------
+
+enum JobType {
+  INBOUND_EMAIL_PROCESS
+  OUTBOUND_EMAIL_SEND
+  AMAZON_POLL
+}
+
+enum JobStatus {
+  PENDING
+  RUNNING
+  DONE
+  FAILED
+  RETRY
+}
+
+model Job {
+  id          String    @id @default(cuid())
+  tenantId    String
+  type        JobType
+  payload     Json
+  status      JobStatus @default(PENDING)
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(8)
+  nextRunAt   DateTime  @default(now())
+  lockedAt    DateTime?
+  lockedBy    String?
+  lastError   String?   @db.Text
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([status, nextRunAt])
+  @@index([tenantId, type])
+  @@index([type, status])
 }

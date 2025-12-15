@@ -13,9 +13,12 @@
     "prisma:migrate": "prisma migrate dev --name init_core_schema",
     "prisma:seed": "prisma db seed",
     "worker:amazon": "node dist/workers/amazonPollingWorker.js",
-    "worker:amazon:once": "node dist/workers/amazonPollingWorker.js --once"
+    "worker:amazon:once": "node dist/workers/amazonPollingWorker.js --once",
+    "worker:jobs": "node dist/workers/jobsWorker.js",
+    "worker:jobs:once": "node dist/workers/jobsWorker.js --once"
   },
   "dependencies": {
+    "@aws-sdk/client-ses": "^3.948.0",
     "@fastify/cors": "^11.2.0",
     "@fastify/helmet": "^13.0.2",
     "@fastify/swagger": "^9.6.1",
@@ -26,7 +29,9 @@
     "fastify": "^5.6.2",
     "fastify-jwt": "^4.1.3",
     "fastify-plugin": "^5.1.0",
+    "ioredis": "^5.8.2",
     "node-fetch": "^2.7.0",
+    "nodemailer": "^7.0.11",
     "pg": "^8.16.3",
     "prisma": "^6.3.0",
     "zod": "^4.1.13"
@@ -36,6 +41,7 @@
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^25.0.0",
     "@types/node-fetch": "^2.6.13",
+    "@types/nodemailer": "^7.0.4",
     "@types/pg": "^8.10.1",
     "@typescript-eslint/eslint-plugin": "^8.49.0",
     "@typescript-eslint/parser": "^8.49.0",
