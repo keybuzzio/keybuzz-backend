@@ -15,7 +15,8 @@
     "worker:amazon": "node dist/workers/amazonPollingWorker.js",
     "worker:amazon:once": "node dist/workers/amazonPollingWorker.js --once",
     "worker:jobs": "node dist/workers/jobsWorker.js",
-    "worker:jobs:once": "node dist/workers/jobsWorker.js --once"
+    "worker:jobs:once": "node dist/workers/jobsWorker.js --once",
+    "jobs:enqueue": "node dist/scripts/enqueueScheduledJobs.js"
   },
   "dependencies": {
     "@aws-sdk/client-ses": "^3.948.0",
