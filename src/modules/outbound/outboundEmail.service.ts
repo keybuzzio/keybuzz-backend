@@ -130,7 +130,10 @@ async function sendViaSMTP(email: { to: string; from: string; subject: string; b
       user: smtpUser,
       pass: smtpPass,
     },
-    connectionTimeout: 5000, // 5s timeout
+    tls: {
+      rejectUnauthorized: false, // Accept self-signed cert for internal network
+    },
+    connectionTimeout: 10000, // 10s timeout
   });
 
   await transporter.sendMail({
