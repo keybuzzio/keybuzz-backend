@@ -69,3 +69,40 @@ export async function isVaultAvailable(): Promise<boolean> {
   }
 }
 
+
+/**
+ * Get an entire secret object from Vault KV v2
+ * @param path Path in Vault without prefix (e.g., "smtp" → secret/data/keybuzz/smtp)
+ * @returns The entire secret object
+ */
+export async function getVaultObject(path: string): Promise<Record<string, any>> {
+  try {
+    let token = process.env.VAULT_TOKEN;
+    
+    if (!token) {
+      try {
+        token = execSync(`cat ${VAULT_TOKEN_FILE}`, { encoding: "utf-8" }).trim();
+      } catch {
+        throw new Error("Vault token not found");
+      }
+    }
+
+    const fullPath = `secret/data/keybuzz/${path}`;
+
+    const response = await fetch(`${VAULT_ADDR}/v1/${fullPath}`, {
+      headers: {
+        "X-Vault-Token": token,
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Vault error: ${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    return data.data?.data || {};
+  } catch (error: any) {
+    console.error(`[Vault] Failed to get object "${path}":`, error.message);
+    throw error;
+  }
+}

@@ -13,7 +13,6 @@ import { registerTicketMessageRoutes } from "./modules/tickets/messages.routes";
 import { registerAiTestRoutes } from "./modules/ai/ai.routes";
 import { registerMarketplaceRoutes } from "./modules/marketplaces/marketplaces.routes";
 import { registerInboundRoutes } from "./modules/inbound/inbound.routes";
-import { registerInboundEmailRoutes } from "./modules/inboundEmail/inboundEmail.routes";
 import { registerOutboundRoutes } from "./modules/outbound/outbound.routes";
 import { registerOpsRoutes } from './modules/ops/ops.routes';
 
@@ -47,7 +46,6 @@ async function bootstrap() {
   registerAiTestRoutes(app);
   await registerMarketplaceRoutes(app);
   await registerInboundRoutes(app);
-  await registerInboundEmailRoutes(app);
   await registerOutboundRoutes(app);
   await registerOpsRoutes(app);
 

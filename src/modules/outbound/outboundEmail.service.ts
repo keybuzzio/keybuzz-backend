@@ -8,7 +8,7 @@ import nodemailer from "nodemailer";
 import { SESClient, SendEmailCommand } from "@aws-sdk/client-ses";
 
 // Vault helper (réutiliser celui d'Amazon si disponible, sinon créer un générique)
-import { getVaultSecret } from "../../lib/vault";
+import { getVaultSecret, getVaultObject } from "../../lib/vault";
 
 export interface SendEmailPayload {
   tenantId: string;
@@ -116,21 +116,37 @@ export async function sendEmail(payload: SendEmailPayload): Promise<SendEmailRes
  */
 async function sendViaSMTP(email: { to: string; from: string; subject: string; body: string }) {
   // Get SMTP credentials from Vault
-  const smtpUser = await getVaultSecret("smtp/user");
-  const smtpPass = await getVaultSecret("smtp/password");
-  const smtpHost = process.env.SMTP_HOST || "10.0.0.160"; // mail-core-01
-  const smtpPort = parseInt(process.env.SMTP_PORT || "587");
+  const smtp = await getVaultObject("smtp");
+  const smtpHost = smtp.host || process.env.SMTP_HOST || "10.0.0.160"; // mail-core-01
+  const smtpPort = parseInt((smtp.port || process.env.SMTP_PORT || "587").toString());
+  const smtpUser = smtp.user;
+  const smtpPass = smtp.password;
 
-  const transporter = nodemailer.createTransport({
+const transportConfig: any = {
     host: smtpHost,
     port: smtpPort,
-    secure: false, // STARTTLS
-    auth: {
+    secure: false,
+    connectionTimeout: 10000,
+    tls: {
+      rejectUnauthorized: false, // Accept self-signed cert
+    },
+  };
+
+  // For port 25 (internal relay), disable TLS completely
+  if (smtpPort === 25) {
+    transportConfig.ignoreTLS = true;
+    delete transportConfig.tls;
+  }
+
+  // Only add auth if user/password are provided (skip for internal relay)
+  if (smtpUser && smtpPass) {
+    transportConfig.auth = {
       user: smtpUser,
       pass: smtpPass,
-    },
-    connectionTimeout: 5000, // 5s timeout
-  });
+    };
+  }
+
+  const transporter = nodemailer.createTransport(transportConfig);
 
   await transporter.sendMail({
     from: email.from,
@@ -145,9 +161,10 @@ async function sendViaSMTP(email: { to: string; from: string; subject: string; b
  */
 async function sendViaSES(email: { to: string; from: string; subject: string; body: string }) {
   // Get SES credentials from Vault
-  const accessKeyId = await getVaultSecret("ses/access_key");
-  const secretAccessKey = await getVaultSecret("ses/secret_key");
-  const region = await getVaultSecret("ses/region").catch(() => "eu-west-1");
+  const ses = await getVaultObject("ses");
+  const accessKeyId = ses.access_key;
+  const secretAccessKey = ses.secret_key;
+  const region = ses.region || "eu-west-1";
 
   const sesClient = new SESClient({
     region,
