@@ -8,7 +8,7 @@ import nodemailer from "nodemailer";
 import { SESClient, SendEmailCommand } from "@aws-sdk/client-ses";
 
 // Vault helper (réutiliser celui d'Amazon si disponible, sinon créer un générique)
-import { getVaultSecret } from "../../lib/vault";
+import { getVaultSecret, getVaultObject } from "../../lib/vault";
 
 export interface SendEmailPayload {
   tenantId: string;
@@ -116,10 +116,11 @@ export async function sendEmail(payload: SendEmailPayload): Promise<SendEmailRes
  */
 async function sendViaSMTP(email: { to: string; from: string; subject: string; body: string }) {
   // Get SMTP credentials from Vault
-  const smtpUser = await getVaultSecret("smtp/user");
-  const smtpPass = await getVaultSecret("smtp/password");
-  const smtpHost = process.env.SMTP_HOST || "10.0.0.160"; // mail-core-01
-  const smtpPort = parseInt(process.env.SMTP_PORT || "587");
+  const smtp = await getVaultObject("smtp");
+  const smtpHost = smtp.host || process.env.SMTP_HOST || "10.0.0.160"; // mail-core-01
+  const smtpPort = parseInt((smtp.port || process.env.SMTP_PORT || "587").toString());
+  const smtpUser = smtp.user;
+  const smtpPass = smtp.password;
 
   const transporter = nodemailer.createTransport({
     host: smtpHost,
@@ -145,9 +146,10 @@ async function sendViaSMTP(email: { to: string; from: string; subject: string; b
  */
 async function sendViaSES(email: { to: string; from: string; subject: string; body: string }) {
   // Get SES credentials from Vault
-  const accessKeyId = await getVaultSecret("ses/access_key");
-  const secretAccessKey = await getVaultSecret("ses/secret_key");
-  const region = await getVaultSecret("ses/region").catch(() => "eu-west-1");
+  const ses = await getVaultObject("ses");
+  const accessKeyId = ses.access_key;
+  const secretAccessKey = ses.secret_key;
+  const region = ses.region || "eu-west-1";
 
   const sesClient = new SESClient({
     region,
