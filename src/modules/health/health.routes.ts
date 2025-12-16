@@ -3,7 +3,8 @@ import { env } from "../../config/env";
 import { testDbConnection } from "../../lib/db";
 
 export function registerHealthRoutes(app: FastifyInstance) {
-  app.get("/health", async () => {
+  // Health endpoints should be public (no auth required)
+  app.get("/health", { preHandler: [] }, async () => {
     return {
       status: "ok",
       uptime: process.uptime(),
@@ -12,7 +13,7 @@ export function registerHealthRoutes(app: FastifyInstance) {
     };
   });
 
-  app.get("/health/db", async (_request, reply) => {
+  app.get("/health/db", { preHandler: [] }, async (_request, reply) => {
     const ok = await testDbConnection();
     if (!ok) {
       return reply.code(500).send({ status: "error" });
@@ -20,4 +21,3 @@ export function registerHealthRoutes(app: FastifyInstance) {
     return { status: "ok" };
   });
 }
-
