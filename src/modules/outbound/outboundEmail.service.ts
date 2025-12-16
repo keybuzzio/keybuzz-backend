@@ -122,19 +122,31 @@ async function sendViaSMTP(email: { to: string; from: string; subject: string; b
   const smtpUser = smtp.user;
   const smtpPass = smtp.password;
 
-  const transporter = nodemailer.createTransport({
+const transportConfig: any = {
     host: smtpHost,
     port: smtpPort,
-    secure: false, // STARTTLS
-    auth: {
+    secure: false,
+    connectionTimeout: 10000,
+    tls: {
+      rejectUnauthorized: false, // Accept self-signed cert
+    },
+  };
+
+  // For port 25 (internal relay), disable TLS completely
+  if (smtpPort === 25) {
+    transportConfig.ignoreTLS = true;
+    delete transportConfig.tls;
+  }
+
+  // Only add auth if user/password are provided (skip for internal relay)
+  if (smtpUser && smtpPass) {
+    transportConfig.auth = {
       user: smtpUser,
       pass: smtpPass,
-    },
-    tls: {
-      rejectUnauthorized: false, // Accept self-signed cert for internal network
-    },
-    connectionTimeout: 10000, // 10s timeout
-  });
+    };
+  }
+
+  const transporter = nodemailer.createTransport(transportConfig);
 
   await transporter.sendMail({
     from: email.from,
