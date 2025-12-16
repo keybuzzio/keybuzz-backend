@@ -3,6 +3,7 @@
 import type { FastifyInstance } from "fastify";
 import { prisma } from "../../lib/db";
 import { MarketplaceType } from "@prisma/client";
+import { parseInboundAddress, processValidationEmail } from "./inbound.service";
 
 export async function registerInboundRoutes(server: FastifyInstance) {
   /**
@@ -26,13 +27,31 @@ export async function registerInboundRoutes(server: FastifyInstance) {
         messageId: payload.messageId,
       });
 
-      // Parse recipient: marketplace.tenantId@inbound.keybuzz.io
-      const toMatch = payload.to.match(/^([^.]+)\.([^@]+)@/);
-      if (!toMatch) {
+      // PH11-06B.5A: Check if this is a validation email
+      const validationResult = await processValidationEmail({
+        to: payload.to,
+        subject: payload.subject || '',
+        from: payload.from,
+        messageId: payload.messageId,
+      });
+
+      if (validationResult.validated) {
+        console.log(`[Validation] Email processed as validation: ${payload.messageId}`);
+        return reply.send({
+          success: true,
+          validation: true,
+          addressId: validationResult.addressId,
+          messageId: payload.messageId,
+        });
+      }
+
+      // Parse recipient avec nouveau format ou legacy
+      const parsed = parseInboundAddress(payload.to);
+      if (!parsed.marketplace || !parsed.tenantId) {
         return reply.status(400).send({ error: "Invalid recipient format" });
       }
 
-      const [, marketplace, tenantId] = toMatch;
+      const { marketplace, tenantId } = parsed;
 
       if (marketplace.toLowerCase() !== "amazon") {
         return reply.status(400).send({ error: "Unsupported marketplace" });
@@ -133,4 +152,3 @@ export async function registerInboundRoutes(server: FastifyInstance) {
     }
   });
 }
-

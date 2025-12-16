@@ -54,6 +54,8 @@ model Tenant {
   tenantBillingPlans  TenantBillingPlan[]
   tenantQuotaUsages   TenantQuotaUsage[]
   ticketBillingUsages TicketBillingUsage[]
+  inboundConnections  InboundConnection[]
+  inboundAddresses    InboundAddress[]
 }
 
 model User {
@@ -411,7 +413,7 @@ model AiUsageLog {
   taskType      String
   tokensInput   Int
   tokensOutput  Int
-  estimatedCost Int      // en centimes
+  estimatedCost Int // en centimes
   latencyMs     Int
   createdAt     DateTime @default(now())
 
@@ -419,7 +421,7 @@ model AiUsageLog {
 }
 
 model TenantAiBudget {
-  tenantId                 String  @id
+  tenantId                 String   @id
   monthlyBudgetCents       Int
   softLimitPercent         Int
   downgradePercent         Int
@@ -575,4 +577,51 @@ model Job {
   @@index([status, nextRunAt])
   @@index([tenantId, type])
   @@index([type, status])
+}
+
+// PH11-06B.5A - Inbound Email Validation
+enum InboundValidationStatus {
+  PENDING
+  VALIDATED
+  FAILED
+}
+
+model InboundConnection {
+  id          String                      @id @default(cuid())
+  tenantId    String
+  marketplace String
+  countries   Json
+  status      MarketplaceConnectionStatus @default(PENDING)
+  createdAt   DateTime                    @default(now())
+  updatedAt   DateTime                    @updatedAt
+
+  tenant    Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  addresses InboundAddress[]
+
+  @@unique([tenantId, marketplace])
+  @@index([status])
+  @@map("inbound_connections")
+}
+
+model InboundAddress {
+  id                   String                  @id @default(cuid())
+  connectionId         String
+  tenantId             String
+  marketplace          String
+  country              String
+  token                String
+  emailAddress         String
+  validationStatus     InboundValidationStatus @default(PENDING)
+  lastInboundAt        DateTime?
+  lastInboundMessageId String?
+  lastError            String?
+  createdAt            DateTime                @default(now())
+  updatedAt            DateTime                @updatedAt
+
+  connection InboundConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  tenant     Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, marketplace, country])
+  @@index([validationStatus, lastInboundAt])
+  @@map("inbound_addresses")
 }
