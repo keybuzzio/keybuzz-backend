@@ -1,4 +1,5 @@
 import Fastify from "fastify";
+import fastifyJwt from "@fastify/jwt";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
 import swagger from "@fastify/swagger";
@@ -13,6 +14,7 @@ import { registerTicketMessageRoutes } from "./modules/tickets/messages.routes";
 import { registerAiTestRoutes } from "./modules/ai/ai.routes";
 import { registerMarketplaceRoutes } from "./modules/marketplaces/marketplaces.routes";
 import { registerInboundRoutes } from "./modules/inbound/inbound.routes";
+import { registerInboundEmailWebhookRoutes } from "./modules/webhooks/inboundEmailWebhook.routes";
 import { registerInboundEmailRoutes } from "./modules/inboundEmail/inboundEmail.routes";
 import { registerOutboundRoutes } from "./modules/outbound/outbound.routes";
 import { registerOpsRoutes } from './modules/ops/ops.routes';
@@ -23,6 +25,11 @@ async function bootstrap() {
     bodyLimit: 1048576, // 1MB
   });
 
+
+  // Register JWT plugin
+  await app.register(fastifyJwt, {
+    secret: process.env.JWT_SECRET || "fallback-secret-change-me"
+  });
   await app.register(cors);
   await app.register(helmet);
 
