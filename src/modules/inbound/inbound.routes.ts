@@ -12,6 +12,13 @@ export async function registerInboundRoutes(server: FastifyInstance) {
    */
   server.post("/api/v1/inbound/email", async (request, reply) => {
     try {
+    // PH11-06B.5F: Webhook auth
+    const internalKey = String(request.headers["x-internal-key"] ?? "");
+    const expectedKey = process.env.INBOUND_WEBHOOK_KEY ?? "";
+    if (!expectedKey || internalKey !== expectedKey) {
+      return reply.code(401).send({ error: "Unauthorized" });
+    }
+
       const payload = request.body as {
         from: string;
         to: string;
