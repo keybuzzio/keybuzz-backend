@@ -52,7 +52,7 @@ export async function ensureInboundConnection(params: {
       tenantId,
       marketplace,
       countries,
-      status: 'CONNECTED',
+      status: 'DRAFT',
     },
     update: {
       countries,
