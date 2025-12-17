@@ -20,7 +20,7 @@ export interface HealthCheckResult {
  */
 export async function checkDKIM(domain: string = "inbound.keybuzz.io"): Promise<HealthCheckResult> {
   try {
-    // Check for default._domainkey.inbound.keybuzz.io
+    // Check for kbz1._domainkey.inbound.keybuzz.io
     const dkimSelector = "default";
     const dkimDomain = `${dkimSelector}._domainkey.${domain}`;
     
