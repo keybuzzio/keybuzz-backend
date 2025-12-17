@@ -11,8 +11,79 @@ export async function registerInboundRoutes(server: FastifyInstance) {
    * Receive inbound emails from mail server webhook
    */
   server.post("/api/v1/inbound/email", async (request, reply) => {
+    // PH11-06B.5F: Validate internal webhook key
+    const internalKey = request.headers['x-internal-key'] as string;
+    const expectedKey = process.env.INBOUND_WEBHOOK_KEY;
+    
+    if (!expectedKey) {
+      console.warn('[InboundEmail] INBOUND_WEBHOOK_KEY not configured');
+    } else if (!internalKey || internalKey !== expectedKey) {
+      console.warn('[InboundEmail] Unauthorized webhook attempt');
+      return reply.status(401).send({ error: 'Unauthorized' });
+    }
+
+    // Handle raw email (message/rfc822) content type
+    let payload: {
+      from: string;
+      to: string;
+      subject?: string;
+      messageId: string;
+      receivedAt: string;
+      body: string;
+    };
+
+    const contentType = request.headers['content-type'] || '';
+    
+    if (contentType.includes('message/rfc822') || typeof request.body === 'string') {
+      // Parse raw email
+      const rawEmail = typeof request.body === 'string' ? request.body : String(request.body);
+      const lines = rawEmail.split('\n');
+      
+      let from = '';
+      let to = '';
+      let subject = '';
+      let messageId = `inbound-${Date.now()}`;
+      let bodyStartIndex = 0;
+      
+      // Parse headers
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (line.trim() === '') {
+          bodyStartIndex = i + 1;
+          break;
+        }
+        
+        if (line.match(/^From:/i)) {
+          from = line.replace(/^From:\s*/i, '').trim();
+        } else if (line.match(/^To:/i)) {
+          to = line.replace(/^To:\s*/i, '').trim();
+        } else if (line.match(/^Subject:/i)) {
+          subject = line.replace(/^Subject:\s*/i, '').trim();
+        } else if (line.match(/^Message-ID:/i)) {
+          messageId = line.replace(/^Message-ID:\s*/i, '').trim().replace(/[<>]/g, '');
+        }
+      }
+      
+      const body = lines.slice(bodyStartIndex).join('\n');
+      
+      payload = {
+        from,
+        to,
+        subject,
+        messageId,
+        receivedAt: new Date().toISOString(),
+        body,
+      };
+      
+      console.log('[InboundEmail] Parsed raw email:', { from, to, subject, messageId });
+    } else {
+      // JSON payload (existing behavior)
+      payload = request.body as any;
+    }
+
     try {
-      const payload = request.body as {
+  server.post("/api/v1/inbound/email", async (request, reply) => {
+    try {
         from: string;
         to: string;
         subject?: string;
