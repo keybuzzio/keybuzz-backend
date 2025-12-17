@@ -25,16 +25,23 @@ async function bootstrap() {
     bodyLimit: 1048576, // 1MB
   });
 
-  // Register CORS and Helmet
+  // CORS and security BEFORE routes
   await app.register(cors);
   await app.register(helmet);
 
-  // Register JWT plugin (jwt.ts handles the bypass for webhooks)
+  // ====================================
+  // WEBHOOK ROUTES (NO JWT REQUIRED) - MUST BE REGISTERED FIRST
+  // ====================================
+  registerInboundEmailWebhookRoutes(app);
+
+  // ====================================
+  // JWT PLUGIN - APPLIES TO ALL ROUTES REGISTERED AFTER THIS
+  // ====================================
   await app.register(fastifyJwt, {
     secret: process.env.JWT_SECRET || "fallback-secret-change-me"
   });
 
-  // Register Swagger
+  // Swagger (uses JWT)
   await app.register(swagger, {
     openapi: {
       info: {
@@ -48,8 +55,9 @@ async function bootstrap() {
     routePrefix: "/docs",
   });
 
-  // Register all routes (jwt.ts bypass handles webhook exception)
-  await registerInboundEmailWebhookRoutes(app);
+  // ====================================
+  // PROTECTED ROUTES (JWT REQUIRED)
+  // ====================================
   registerHealthRoutes(app);
   registerTenantRoutes(app);
   registerAuthRoutes(app);

@@ -10,18 +10,6 @@ import { ensureInboundConnection } from "./inboundEmailAddress.service";
 import { CreateConnectionSchema } from "./inboundEmail.validation";
 import { sendValidationEmail, regenerateToken } from "./inboundEmailValidation.service";
 
-// Extend FastifyRequest to include user
-declare module "fastify" {
-  interface FastifyRequest {
-    user?: {
-      userId: string;
-      email: string;
-      tenantId?: string;
-      role: string;
-    };
-  }
-}
-
 /**
  * JWT Authentication preHandler
  */
@@ -43,13 +31,13 @@ export async function registerInboundEmailRoutes(server: FastifyInstance) {
    */
   server.get("/api/v1/inbound-email/connections", async (request, reply) => {
     try {
-      const tenantId = request.user?.tenantId;
-      if (!tenantId) {
+      const user = request.user;
+      if (!user || !user.tenantId) {
         return reply.status(403).send({ error: "Forbidden: no tenantId" });
       }
 
       const connections = await prisma.inboundConnection.findMany({
-        where: { tenantId },
+        where: { tenantId: user.tenantId },
         include: {
           addresses: true,
           tenant: { select: { name: true } },
@@ -80,13 +68,13 @@ export async function registerInboundEmailRoutes(server: FastifyInstance) {
   server.get("/api/v1/inbound-email/connections/:id", async (request, reply) => {
     try {
       const { id } = request.params as { id: string };
-      const tenantId = request.user?.tenantId;
-      if (!tenantId) {
+      const user = request.user;
+      if (!user || !user.tenantId) {
         return reply.status(403).send({ error: "Forbidden: no tenantId" });
       }
 
       const connection = await prisma.inboundConnection.findUnique({
-        where: { id, tenantId },
+        where: { id, tenantId: user.tenantId },
         include: {
           addresses: true,
           tenant: { select: { name: true } },
@@ -125,7 +113,7 @@ export async function registerInboundEmailRoutes(server: FastifyInstance) {
       if (!validationResult.success) {
         return reply.status(400).send({
           error: "Validation failed",
-          details: validationResult.error.errors.map((e) => ({
+          details: validationResult.error.issues.map((e) => ({
             field: e.path.join('.'),
             message: e.message,
           })),
@@ -133,13 +121,18 @@ export async function registerInboundEmailRoutes(server: FastifyInstance) {
       }
       
       const { marketplace, countries } = validationResult.data;
-      let { tenantId } = validationResult.data;
+      let tenantId = validationResult.data.tenantId;
       
       // 2) Determine tenantId based on role
-      const userRole = request.user?.role;
-      const userTenantId = request.user?.tenantId;
+      const user = request.user;
+      if (!user) {
+        return reply.status(401).send({ error: "Unauthorized" });
+      }
       
-      if (userRole === 'SUPER_ADMIN') {
+      const userRole = user.role;
+      const userTenantId = user.tenantId;
+      
+      if (userRole === "super_admin" || userRole === "SUPER_ADMIN") {
         // Super admin must provide tenantId in body
         if (!tenantId) {
           return reply.status(400).send({
@@ -170,8 +163,12 @@ export async function registerInboundEmailRoutes(server: FastifyInstance) {
         tenantId = userTenantId;
       }
       
-      // 3) Create connection
-      const connection = await ensureInboundConnection({ tenantId, marketplace: marketplace as any, countries });
+      // 3) Create connection - tenantId is guaranteed to be string here
+      const connection = await ensureInboundConnection({
+        tenantId: tenantId as string,
+        marketplace: marketplace,
+        countries: countries,
+      });
       
       if (!connection) {
         return reply.status(500).send({
@@ -182,28 +179,30 @@ export async function registerInboundEmailRoutes(server: FastifyInstance) {
       
       return reply.send(connection);
       
-    } catch (error: any) {
+    } catch (error) {
       console.error("[InboundEmail] Error creating connection:", error);
       
+      const err = error as { code?: string; message?: string };
+      
       // Handle Prisma errors
-      if (error.code === 'P2002') {
+      if (err.code === 'P2002') {
         return reply.status(409).send({
           error: "Conflict",
           message: "Connection already exists for this tenant and marketplace",
         });
       }
       
-      if (error.code && error.code.startsWith('P')) {
+      if (err.code && err.code.startsWith('P')) {
         return reply.status(400).send({
           error: "Database Error",
-          message: error.message || "Database operation failed",
+          message: err.message || "Database operation failed",
         });
       }
       
       // Generic error
       return reply.status(500).send({
         error: "Internal Server Error",
-        message: error.message || "Failed to create connection",
+        message: err.message || "Failed to create connection",
       });
     }
   });
@@ -216,9 +215,9 @@ export async function registerInboundEmailRoutes(server: FastifyInstance) {
     try {
       const { id } = request.params as { id: string };
       const { country } = request.body as { country: string };
-      const tenantId = request.user?.tenantId;
+      const user = request.user;
 
-      if (!tenantId) {
+      if (!user || !user.tenantId) {
         return reply.status(403).send({ error: "Forbidden: no tenantId" });
       }
 
@@ -228,7 +227,7 @@ export async function registerInboundEmailRoutes(server: FastifyInstance) {
 
       // Verify connection belongs to tenant
       const connection = await prisma.inboundConnection.findUnique({
-        where: { id, tenantId },
+        where: { id, tenantId: user.tenantId },
       });
 
       if (!connection) {
@@ -251,15 +250,15 @@ export async function registerInboundEmailRoutes(server: FastifyInstance) {
   server.post("/api/v1/inbound-email/addresses/:id/regenerate", async (request, reply) => {
     try {
       const { id } = request.params as { id: string };
-      const tenantId = request.user?.tenantId;
+      const user = request.user;
 
-      if (!tenantId) {
+      if (!user || !user.tenantId) {
         return reply.status(403).send({ error: "Forbidden: no tenantId" });
       }
 
       // Verify address belongs to tenant
       const address = await prisma.inboundAddress.findUnique({
-        where: { id, tenantId },
+        where: { id, tenantId: user.tenantId },
       });
 
       if (!address) {
@@ -268,7 +267,7 @@ export async function registerInboundEmailRoutes(server: FastifyInstance) {
 
       const result = await regenerateToken(id);
 
-      return reply.send({ success: true, newEmailAddress: result.newEmailAddress });
+      return reply.send({ success: true, emailAddress: result.emailAddress });
     } catch (error) {
       console.error("[InboundEmail] Error regenerating token:", error);
       return reply.status(500).send({ error: "Failed to regenerate token", details: (error as Error).message });
@@ -279,7 +278,7 @@ export async function registerInboundEmailRoutes(server: FastifyInstance) {
    * GET /api/v1/inbound-email/health
    * Get health indicators (mock for now)
    */
-  server.get("/api/v1/inbound-email/health", async (request, reply) => {
+  server.get("/api/v1/inbound-email/health", async (_request, reply) => {
     // Mock health indicators
     const indicators = [
       { name: "DKIM Inbound", status: "OK", message: "DKIM signature valid", lastCheckedAt: new Date().toISOString() },
@@ -298,15 +297,15 @@ export async function registerInboundEmailRoutes(server: FastifyInstance) {
   server.get("/api/v1/inbound-email/health/:connectionId", async (request, reply) => {
     try {
       const { connectionId } = request.params as { connectionId: string };
-      const tenantId = request.user?.tenantId;
+      const user = request.user;
 
-      if (!tenantId) {
+      if (!user || !user.tenantId) {
         return reply.status(403).send({ error: "Forbidden: no tenantId" });
       }
 
       // Verify connection belongs to tenant
       const connection = await prisma.inboundConnection.findUnique({
-        where: { id: connectionId, tenantId },
+        where: { id: connectionId, tenantId: user.tenantId },
       });
 
       if (!connection) {
@@ -314,7 +313,7 @@ export async function registerInboundEmailRoutes(server: FastifyInstance) {
       }
 
       // Get all health checks
-      const indicators = await getAllHealthChecks(connectionId, tenantId);
+      const indicators = await getAllHealthChecks(connectionId, user.tenantId);
 
       return reply.send({
         connectionId,
@@ -346,15 +345,15 @@ export async function registerInboundEmailRoutes(server: FastifyInstance) {
         return reply.status(403).send({ error: "Not available in production" });
       }
 
-      const tenantId = request.user?.tenantId;
-      if (!tenantId) {
+      const user = request.user;
+      if (!user || !user.tenantId) {
         return reply.status(403).send({ error: "Forbidden: no tenantId" });
       }
 
       // Check if demo connection already exists
       const existing = await prisma.inboundConnection.findFirst({
         where: {
-          tenantId,
+          tenantId: user.tenantId,
           marketplace: "AMAZON",
         },
       });
@@ -366,8 +365,12 @@ export async function registerInboundEmailRoutes(server: FastifyInstance) {
         });
       }
 
-      // Create demo connection
-      const connection = await ensureInboundConnection(tenantId, "AMAZON" as any, ["FR", "DE", "UK"]);
+      // Create demo connection with correct signature
+      const connection = await ensureInboundConnection({
+        tenantId: user.tenantId,
+        marketplace: "AMAZON",
+        countries: ["FR", "DE", "UK"],
+      });
 
       return reply.send({
         message: "Demo connection created",
@@ -380,3 +383,4 @@ export async function registerInboundEmailRoutes(server: FastifyInstance) {
   });
 
 }
+
