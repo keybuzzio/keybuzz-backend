@@ -7,6 +7,7 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { getAllHealthChecks } from "../inbound/inboundHealth.service";
 import { prisma } from "../../lib/db";
 import { ensureInboundConnection } from "./inboundEmailAddress.service";
+import { CreateConnectionSchema } from "./inboundEmail.validation";
 import { sendValidationEmail, regenerateToken } from "./inboundEmailValidation.service";
 
 // Extend FastifyRequest to include user
@@ -118,23 +119,92 @@ export async function registerInboundEmailRoutes(server: FastifyInstance) {
    */
   server.post("/api/v1/inbound-email/connections", async (request, reply) => {
     try {
-      const tenantId = request.user?.tenantId;
-      if (!tenantId) {
-        return reply.status(403).send({ error: "Forbidden: no tenantId" });
+      // 1) Validate input
+      const validationResult = CreateConnectionSchema.safeParse(request.body);
+      
+      if (!validationResult.success) {
+        return reply.status(400).send({
+          error: "Validation failed",
+          details: validationResult.error.errors.map((e) => ({
+            field: e.path.join('.'),
+            message: e.message,
+          })),
+        });
       }
-
-      const { marketplace, countries } = request.body as { marketplace: string; countries: string[] };
-
-      if (!marketplace || !Array.isArray(countries) || countries.length === 0) {
-        return reply.status(400).send({ error: "Invalid marketplace or countries" });
+      
+      const { marketplace, countries } = validationResult.data;
+      let { tenantId } = validationResult.data;
+      
+      // 2) Determine tenantId based on role
+      const userRole = request.user?.role;
+      const userTenantId = request.user?.tenantId;
+      
+      if (userRole === 'SUPER_ADMIN') {
+        // Super admin must provide tenantId in body
+        if (!tenantId) {
+          return reply.status(400).send({
+            error: "Bad Request",
+            message: "tenantId is required for super_admin role",
+          });
+        }
+        
+        // Verify tenant exists
+        const tenant = await prisma.tenant.findUnique({
+          where: { id: tenantId },
+        });
+        
+        if (!tenant) {
+          return reply.status(404).send({
+            error: "Not Found",
+            message: `Tenant ${tenantId} not found`,
+          });
+        }
+      } else {
+        // Other roles use their own tenantId
+        if (!userTenantId) {
+          return reply.status(403).send({
+            error: "Forbidden",
+            message: "No tenantId associated with your account",
+          });
+        }
+        tenantId = userTenantId;
       }
-
+      
+      // 3) Create connection
       const connection = await ensureInboundConnection(tenantId, marketplace as any, countries);
-
+      
+      if (!connection) {
+        return reply.status(500).send({
+          error: "Internal Server Error",
+          message: "Failed to create connection",
+        });
+      }
+      
       return reply.send(connection);
-    } catch (error) {
+      
+    } catch (error: any) {
       console.error("[InboundEmail] Error creating connection:", error);
-      return reply.status(500).send({ error: "Failed to create connection" });
+      
+      // Handle Prisma errors
+      if (error.code === 'P2002') {
+        return reply.status(409).send({
+          error: "Conflict",
+          message: "Connection already exists for this tenant and marketplace",
+        });
+      }
+      
+      if (error.code && error.code.startsWith('P')) {
+        return reply.status(400).send({
+          error: "Database Error",
+          message: error.message || "Database operation failed",
+        });
+      }
+      
+      // Generic error
+      return reply.status(500).send({
+        error: "Internal Server Error",
+        message: error.message || "Failed to create connection",
+      });
     }
   });
 
