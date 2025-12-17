@@ -112,7 +112,7 @@ async function inboundEmailWebhookPlugin(server: FastifyInstance, _opts: Fastify
       console.log("[Webhook] ExternalMessage created:", externalMessage.id);
 
       // Update InboundAddress lastInboundAt if exists
-      const country = parsed.country || 'FR'; // fallback
+      const country = (parsed.country || 'FR').toUpperCase(); // fallback
       await prisma.inboundAddress.updateMany({
         where: {
           tenantId,
