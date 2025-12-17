@@ -171,7 +171,7 @@ export async function registerInboundEmailRoutes(server: FastifyInstance) {
       }
       
       // 3) Create connection
-      const connection = await ensureInboundConnection(tenantId, marketplace as any, countries);
+      const connection = await ensureInboundConnection({ tenantId, marketplace: marketplace as any, countries });
       
       if (!connection) {
         return reply.status(500).send({
