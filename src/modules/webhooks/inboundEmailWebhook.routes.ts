@@ -1,15 +1,15 @@
-// PH11-06B.5F.1: Dedicated inbound email webhook (no JWT)
-import type { FastifyInstance } from "fastify";
+// PH11-06B.5F: Dedicated inbound email webhook (no JWT, protected by X-Internal-Key only)
+import type { FastifyInstance, FastifyPluginOptions } from "fastify";
 import { prisma } from "../../lib/db";
 import { MarketplaceType } from "@prisma/client";
 import { parseInboundAddress, processValidationEmail } from "../inbound/inbound.service";
 
-export async function registerInboundEmailWebhookRoutes(server: FastifyInstance) {
+async function inboundEmailWebhookPlugin(server: FastifyInstance, _opts: FastifyPluginOptions) {
   /**
-   * POST /api/v1/webhooks/inbound-email
+   * POST /inbound-email
    * Dedicated webhook endpoint for Postfix (no JWT, internal key auth only)
    */
-  server.post("/api/v1/webhooks/inbound-email", async (request, reply) => {
+  server.post("/inbound-email", async (request, reply) => {
     // Internal key authentication
     const internalKey = String(request.headers["x-internal-key"] ?? "");
     const expectedKey = process.env.INBOUND_WEBHOOK_KEY ?? "";
@@ -90,24 +90,29 @@ export async function registerInboundEmailWebhookRoutes(server: FastifyInstance)
         return reply.send({ success: true, message: "Already processed" });
       }
 
-      // Create ExternalMessage
+      // Create ExternalMessage (using correct schema fields)
       const externalMessage = await prisma.externalMessage.create({
         data: {
           tenantId,
           connectionId: tenantId,
           type: MarketplaceType.AMAZON,
           externalId: payload.messageId,
-          subject: payload.subject || "",
-          rawContent: payload.body,
-          senderEmail: payload.from,
+          buyerEmail: payload.from,
           receivedAt: new Date(payload.receivedAt),
+          raw: {
+            from: payload.from,
+            to: payload.to,
+            subject: payload.subject || "",
+            body: payload.body,
+            messageId: payload.messageId,
+          },
         },
       });
 
       console.log("[Webhook] ExternalMessage created:", externalMessage.id);
 
       // Update InboundAddress lastInboundAt if exists
-      const country = parsed.country || 'FR'; // fallback
+      const country = (parsed.country || 'FR').toUpperCase(); // fallback
       await prisma.inboundAddress.updateMany({
         where: {
           tenantId,
@@ -132,3 +137,9 @@ export async function registerInboundEmailWebhookRoutes(server: FastifyInstance)
     }
   });
 }
+
+// Export as regular function to be registered with prefix
+export async function registerInboundEmailWebhookRoutes(server: FastifyInstance) {
+  await server.register(inboundEmailWebhookPlugin, { prefix: '/api/v1/webhooks' });
+}
+
