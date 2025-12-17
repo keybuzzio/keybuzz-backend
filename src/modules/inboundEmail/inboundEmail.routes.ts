@@ -4,6 +4,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import { getAllHealthChecks } from "../inbound/inboundHealth.service";
 import { prisma } from "../../lib/db";
 import { ensureInboundConnection } from "./inboundEmailAddress.service";
 import { sendValidationEmail, regenerateToken } from "./inboundEmailValidation.service";
@@ -220,4 +221,92 @@ export async function registerInboundEmailRoutes(server: FastifyInstance) {
 
     return reply.send({ indicators });
   });
+  /**
+   * GET /api/v1/inbound-email/health/:connectionId
+   * Get real health checks for specific connection
+   */
+  server.get("/api/v1/inbound-email/health/:connectionId", async (request, reply) => {
+    try {
+      const { connectionId } = request.params as { connectionId: string };
+      const tenantId = request.user?.tenantId;
+
+      if (!tenantId) {
+        return reply.status(403).send({ error: "Forbidden: no tenantId" });
+      }
+
+      // Verify connection belongs to tenant
+      const connection = await prisma.inboundConnection.findUnique({
+        where: { id: connectionId, tenantId },
+      });
+
+      if (!connection) {
+        return reply.status(404).send({ error: "Connection not found" });
+      }
+
+      // Get all health checks
+      const indicators = await getAllHealthChecks(connectionId, tenantId);
+
+      return reply.send({
+        connectionId,
+        status: connection.status,
+        actionMessage: "Check indicators for details",
+        indicators,
+      });
+    } catch (error) {
+      console.error("[InboundEmail] Error getting health:", error);
+      return reply.status(500).send({ error: "Failed to get health status" });
+    }
+  });
+
+  /**
+   * POST /api/v1/inbound-email/dev/seed
+   * Create demo connection with test data (DEV only)
+   */
+  server.post("/api/v1/inbound-email/dev/seed", {
+    schema: {
+      body: {
+        type: ['object', 'null'],
+        nullable: true
+      }
+    }
+  }, async (request, reply) => {
+    try {
+      // Only allow in non-production
+      if (process.env.NODE_ENV === "production") {
+        return reply.status(403).send({ error: "Not available in production" });
+      }
+
+      const tenantId = request.user?.tenantId;
+      if (!tenantId) {
+        return reply.status(403).send({ error: "Forbidden: no tenantId" });
+      }
+
+      // Check if demo connection already exists
+      const existing = await prisma.inboundConnection.findFirst({
+        where: {
+          tenantId,
+          marketplace: "AMAZON",
+        },
+      });
+
+      if (existing) {
+        return reply.send({
+          message: "Demo connection already exists",
+          connectionId: existing.id,
+        });
+      }
+
+      // Create demo connection
+      const connection = await ensureInboundConnection(tenantId, "AMAZON" as any, ["FR", "DE", "UK"]);
+
+      return reply.send({
+        message: "Demo connection created",
+        connectionId: connection?.id,
+      });
+    } catch (error) {
+      console.error("[InboundEmail] Error seeding demo:", error);
+      return reply.status(500).send({ error: "Failed to create demo connection" });
+    }
+  });
+
 }
