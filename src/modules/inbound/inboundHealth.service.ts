@@ -9,7 +9,7 @@ import https from "https";
 
 export interface HealthCheckResult {
   name: string;
-  status: "OK" | "WARNING" | "ERROR";
+  status: "OK" | "WARNING" | "ERROR" | "NA";
   message: string;
   lastCheckedAt: string;
   details?: any;
@@ -21,7 +21,7 @@ export interface HealthCheckResult {
 export async function checkDKIM(domain: string = "inbound.keybuzz.io"): Promise<HealthCheckResult> {
   try {
     // Check for kbz1._domainkey.inbound.keybuzz.io
-    const dkimSelector = "default";
+    const dkimSelector = "kbz1";
     const dkimDomain = `${dkimSelector}._domainkey.${domain}`;
     
     const records = await dns.resolveTxt(dkimDomain);
@@ -246,8 +246,25 @@ export async function checkBackendAPI(): Promise<HealthCheckResult> {
  */
 export async function checkAmazonPolling(tenantId: string): Promise<HealthCheckResult> {
   try {
-    const { prisma } = await import("../../lib/db");
+    const { prisma } = await import("../../lib/db");    
+    // Check if Amazon OAuth is connected
+    const amazonMarketplace = await prisma.marketplaceConnection.findFirst({
+      where: {
+        tenantId,
+        type: "AMAZON",
+        status: "CONNECTED",
+      },
+    });
     
+    if (!amazonMarketplace) {
+      return {
+        name: "Amazon Polling",
+        status: "NA",
+        message: "Amazon polling not enabled (OAuth not connected)",
+        lastCheckedAt: new Date().toISOString(),
+      };
+    }
+
     // Get last AMAZON_POLL job for tenant
     const lastJob = await prisma.job.findFirst({
       where: {
