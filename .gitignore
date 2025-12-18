@@ -10,3 +10,8 @@ yarn-error.log*
 .DS_Store
 
 /src/generated/prisma
+
+# PH11-06B.5A: Never commit env files with secrets
+.env.production
+.env.production.*
+*.bak.*
