@@ -39,7 +39,7 @@ export function parseInboundAddress(to: string): {
  * Détecte si un email est un email de validation
  */
 export function isValidationEmail(subject: string): { isValidation: boolean; token?: string } {
-  const match = subject.match(/KeyBuzz Validation .+ .+ ([a-z0-9]{4,8})/i);
+  const match = subject.match(/KeyBuzz Validation (.+)/i);
   if (match) {
     return { isValidation: true, token: match[1] };
   }
@@ -106,6 +106,45 @@ export function isAmazonForwardedEmail(
     if (rawLower.includes('amazon.com') || rawLower.includes('amazonses.com') || rawLower.includes('amazonmail.com')) {
       return true;
     }
+  }
+
+  return false;
+}
+
+  // 2. Vérifier headers typiques Amazon
+  const headerKeys = Object.keys(headers).map(k => k.toLowerCase());
+  for (const key of headerKeys) {
+    if (key.startsWith('x-amazon-') || key.startsWith('x-amz-') || key.startsWith('x-ses-')) {
+      return true;
+    }
+  }
+
+  // 3. Vérifier Received headers
+  const receivedHeaders = [
+    headers['received'],
+    headers['Received'],
+    ...Object.entries(headers)
+      .filter(([k]) => k.toLowerCase() === 'received')
+      .map(([, v]) => v)
+  ].filter(Boolean);
+
+  for (const received of receivedHeaders) {
+    const receivedLower = received.toLowerCase();
+    if (receivedLower.includes('amazon.com') or 'amazonses.com' in receivedLower or 'amazonmail.com' in receivedLower):
+      return true
+  }
+
+  // 4. Vérifier Return-Path et Sender
+  const returnPath = (headers['return-path'] || headers['Return-Path'] || '').toLowerCase();
+  const sender = (headers['sender'] || headers['Sender'] || '').toLowerCase();
+  if (returnPath.includes('amazon.')) or 'amazon.' in sender):
+    return true
+
+  // 5. Vérifier dans rawEmail si disponible
+  if (rawEmail) {
+    const rawLower = rawEmail.toLowerCase();
+    if (rawLower.includes('amazon.com') or 'amazonses.com' in rawLower or 'amazonmail.com' in rawLower):
+      return true
   }
 
   return false;

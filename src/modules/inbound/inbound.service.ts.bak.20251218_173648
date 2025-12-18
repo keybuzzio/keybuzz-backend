@@ -39,7 +39,7 @@ export function parseInboundAddress(to: string): {
  * Détecte si un email est un email de validation
  */
 export function isValidationEmail(subject: string): { isValidation: boolean; token?: string } {
-  const match = subject.match(/KeyBuzz Validation .+ .+ ([a-z0-9]{4,8})/i);
+  const match = subject.match(/KeyBuzz Validation (.+)/i);
   if (match) {
     return { isValidation: true, token: match[1] };
   }
@@ -111,6 +111,45 @@ export function isAmazonForwardedEmail(
   return false;
 }
 
+  // 2. Vérifier headers typiques Amazon
+  const headerKeys = Object.keys(headers).map(k => k.toLowerCase());
+  for (const key of headerKeys) {
+    if (key.startsWith('x-amazon-') || key.startsWith('x-amz-') || key.startsWith('x-ses-')) {
+      return true;
+    }
+  }
+
+  // 3. Vérifier Received headers
+  const receivedHeaders = [
+    headers['received'],
+    headers['Received'],
+    ...Object.entries(headers)
+      .filter(([k]) => k.toLowerCase() === 'received')
+      .map(([, v]) => v)
+  ].filter(Boolean);
+
+  for (const received of receivedHeaders) {
+    const receivedLower = received.toLowerCase();
+    if (receivedLower.includes('amazon.com') || receivedLower.includes('amazonses.com') || receivedLower.includes('amazonmail.com')) {
+      return true;
+  }
+
+  // 4. Vérifier Return-Path et Sender
+  const returnPath = (headers['return-path'] || headers['Return-Path'] || '').toLowerCase();
+  const sender = (headers['sender'] || headers['Sender'] || '').toLowerCase();
+  if (returnPath.includes('amazon.') || sender.includes('amazon.')) {
+    return true;
+
+  // 5. Vérifier dans rawEmail si disponible
+  if (rawEmail) {
+    const rawLower = rawEmail.toLowerCase();
+    if (rawLower.includes('amazon.com') || rawLower.includes('amazonses.com') || rawLower.includes('amazonmail.com')) {
+      return true;
+  }
+
+  return false;
+}
+
 export async function processValidationEmail(params: {
   to: string;
   subject: string;
@@ -153,18 +192,36 @@ export async function processValidationEmail(params: {
     return { validated: false, error: 'Address not found' };
   }
 
-  // Marquer comme VALIDATED
+  // Détecter si l'email vient d'Amazon
+  const isAmazon = isAmazonForwardedEmail(
+    params.from,
+    params.headers || {},
+    params.rawEmail
+  );
+
+  // Toujours valider le pipeline (KeyBuzz s'envoie un mail à lui-même)
+  // Mais marketplaceStatus ne passe à VALIDATED que si c'est un forward Amazon réel
+  const updateData: any = {
+    pipelineStatus: 'VALIDATED',
+    lastInboundAt: new Date(),
+    lastInboundMessageId: messageId,
+    lastError: null,
+  };
+
+  if (isAmazon) {
+    updateData.marketplaceStatus = 'VALIDATED';
+    updateData.validationStatus = 'VALIDATED'; // Pour compatibilité
+    logger.info(`[Validation] Address ${to} marked as VALIDATED (Amazon forward detected)`);
+  } else {
+    updateData.marketplaceStatus = 'PENDING';
+    updateData.validationStatus = 'PENDING'; // Pour compatibilité
+    logger.info(`[Validation] Address ${to} pipeline validated, but Amazon forward not detected`);
+  }
+
   await prisma.inboundAddress.update({
     where: { id: address.id },
-    data: {
-      validationStatus: 'VALIDATED',
-      lastInboundAt: new Date(),
-      lastInboundMessageId: messageId,
-      lastError: null,
-    },
+    data: updateData,
   });
-
-  logger.info(`[Validation] Address ${to} marked as VALIDATED`);
 
   return { validated: true, addressId: address.id };
 }

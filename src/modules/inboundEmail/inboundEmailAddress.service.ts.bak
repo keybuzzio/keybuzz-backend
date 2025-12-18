@@ -80,8 +80,7 @@ export async function ensureInboundConnection(params: {
           country,
           token,
           emailAddress,
-          pipelineStatus: 'PENDING',
-          marketplaceStatus: 'PENDING',
+          validationStatus: 'PENDING',
         },
       });
 

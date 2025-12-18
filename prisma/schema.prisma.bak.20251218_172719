@@ -611,9 +611,7 @@ model InboundAddress {
   country              String
   token                String
   emailAddress         String
-  validationStatus     InboundValidationStatus @default(PENDING) // @deprecated - use pipelineStatus and marketplaceStatus
-  pipelineStatus       InboundValidationStatus @default(PENDING)
-  marketplaceStatus    InboundValidationStatus @default(PENDING)
+  validationStatus     InboundValidationStatus @default(PENDING)
   lastInboundAt        DateTime?
   lastInboundMessageId String?
   lastError            String?
@@ -625,7 +623,6 @@ model InboundAddress {
 
   @@unique([tenantId, marketplace, country])
   @@index([validationStatus, lastInboundAt])
-  @@index([pipelineStatus, marketplaceStatus])
   @@map("inbound_addresses")
 }
 

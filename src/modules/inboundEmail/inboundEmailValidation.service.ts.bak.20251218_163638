@@ -6,7 +6,7 @@
 import { prisma } from '../../lib/db';
 import { logger } from '../../config/logger';
 import { enqueueJob } from '../jobs/jobs.service';
-import { JobType, OutboundEmailStatus } from '@prisma/client';
+import { JobType } from '@prisma/client';
 
 /**
  * Envoie email de validation vers l'adresse inbound elle-même (self-test)
@@ -27,7 +27,7 @@ export async function sendValidationEmail(connectionId: string, country?: string
 
   const addressesToValidate = country
     ? connection.addresses.filter(a => a.country === country)
-    : connection.addresses.filter(a => a.marketplaceStatus !== 'VALIDATED');
+    : connection.addresses.filter(a => a.validationStatus !== 'VALIDATED');
 
   const results = [];
 
@@ -36,27 +36,18 @@ export async function sendValidationEmail(connectionId: string, country?: string
     const subject = `KeyBuzz Validation ${address.token}`;
     const body = `Validation self-test\nToken: ${address.token}\nAddress: ${address.emailAddress}`;
 
-        // Create OutboundEmail first
-    const outboundEmail = await prisma.outboundEmail.create({
-      data: {
-        tenantId: connection.tenantId,
-        ticketId: connectionId, // Use connectionId as ticketId for validation emails
-        to: address.emailAddress,
-        from: 'validator@inbound.keybuzz.io',
-        subject,
-        body,
-        status: OutboundEmailStatus.PENDING,
-      },
-    });
-
-    // Enqueue outbound email job with outboundEmailId
+    // Enqueue outbound email job
     const jobId = await enqueueJob({
       type: JobType.OUTBOUND_EMAIL_SEND,
       tenantId: connection.tenantId,
       payload: {
-        outboundEmailId: outboundEmail.id,
+        to: address.emailAddress,
+        from: 'validator@inbound.keybuzz.io',
+        subject,
+        body,
       },
     });
+
     logger.info(`[Validation] Queued email to ${address.emailAddress} (job: ${jobId})`);
 
     results.push({
@@ -101,8 +92,7 @@ export async function regenerateToken(addressId: string) {
     data: {
       token: newToken,
       emailAddress: newEmailAddress,
-      pipelineStatus: 'PENDING',
-      marketplaceStatus: 'PENDING',
+      validationStatus: 'PENDING',
       lastError: null,
     },
   });

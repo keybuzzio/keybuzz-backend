@@ -51,9 +51,9 @@ async function inboundEmailPlugin(server: FastifyInstance, _opts: FastifyPluginO
       const connectionsWithSummary = connections.map((conn) => ({
         ...conn,
         inboundAddressesCount: conn.addresses.length,
-        validatedCount: conn.addresses.filter((a) => a.marketplaceStatus === "VALIDATED").length,
-        pendingCount: conn.addresses.filter((a) => a.marketplaceStatus === "PENDING").length,
-        failedCount: conn.addresses.filter((a) => a.marketplaceStatus === "FAILED").length,
+        validatedCount: conn.addresses.filter((a) => a.validationStatus === "VALIDATED").length,
+        pendingCount: conn.addresses.filter((a) => a.validationStatus === "PENDING").length,
+        failedCount: conn.addresses.filter((a) => a.validationStatus === "FAILED").length,
       }));
 
       return reply.send({ connections: connectionsWithSummary });

@@ -27,7 +27,7 @@ export async function sendValidationEmail(connectionId: string, country?: string
 
   const addressesToValidate = country
     ? connection.addresses.filter(a => a.country === country)
-    : connection.addresses.filter(a => a.marketplaceStatus !== 'VALIDATED');
+    : connection.addresses.filter(a => a.validationStatus !== 'VALIDATED');
 
   const results = [];
 
@@ -101,8 +101,7 @@ export async function regenerateToken(addressId: string) {
     data: {
       token: newToken,
       emailAddress: newEmailAddress,
-      pipelineStatus: 'PENDING',
-      marketplaceStatus: 'PENDING',
+      validationStatus: 'PENDING',
       lastError: null,
     },
   });

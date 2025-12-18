@@ -142,4 +142,3 @@ async function inboundEmailWebhookPlugin(server: FastifyInstance, _opts: Fastify
 export async function registerInboundEmailWebhookRoutes(server: FastifyInstance) {
   await server.register(inboundEmailWebhookPlugin, { prefix: '/api/v1/webhooks' });
 }
-
