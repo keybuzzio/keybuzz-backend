@@ -1,6 +1,6 @@
 /**
  * Service validation email (self-test loop)
- * PH11-06B.5A
+ * PH11-06B.5G.1 - Standardized format
  */
 
 import { prisma } from '../../lib/db';
@@ -10,6 +10,10 @@ import { JobType } from '@prisma/client';
 
 /**
  * Envoie email de validation vers l'adresse inbound elle-même (self-test)
+ * Format standardisé:
+ * - subject: "KeyBuzz Validation <token>"
+ * - from: "validator@inbound.keybuzz.io"
+ * - to: amazon.<tenant>.<country>.<token>@inbound.keybuzz.io
  */
 export async function sendValidationEmail(connectionId: string, country?: string) {
   const connection = await prisma.inboundConnection.findUnique({
@@ -28,7 +32,8 @@ export async function sendValidationEmail(connectionId: string, country?: string
   const results = [];
 
   for (const address of addressesToValidate) {
-    const subject = `KeyBuzz Validation ${connectionId} ${address.country} ${address.token}`;
+    // Format standardisé: subject = "KeyBuzz Validation <token>"
+    const subject = `KeyBuzz Validation ${address.token}`;
     const body = `Validation self-test\nToken: ${address.token}\nAddress: ${address.emailAddress}`;
 
     // Enqueue outbound email job
@@ -37,7 +42,7 @@ export async function sendValidationEmail(connectionId: string, country?: string
       tenantId: connection.tenantId,
       payload: {
         to: address.emailAddress,
-        from: 'noreply@keybuzz.io',
+        from: 'validator@inbound.keybuzz.io',
         subject,
         body,
       },

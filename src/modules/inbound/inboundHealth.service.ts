@@ -173,7 +173,7 @@ export async function checkWebhook(connectionId: string): Promise<HealthCheckRes
       return {
         name: "Webhook",
         status: "WARNING",
-        message: "No inbound email received yet",
+        message: "Check if any address has lastInboundAt",
         lastCheckedAt: new Date().toISOString(),
       };
     }
