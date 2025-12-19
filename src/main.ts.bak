@@ -1,4 +1,5 @@
 import Fastify from "fastify";
+import fastifyJwt from "@fastify/jwt";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
 import swagger from "@fastify/swagger";
@@ -10,13 +11,30 @@ import { registerTenantRoutes } from "./modules/tenants/tenants.routes";
 import { registerAuthRoutes } from "./modules/auth/auth.routes";
 import { registerTicketRoutes } from "./modules/tickets/tickets.routes";
 import { registerTicketMessageRoutes } from "./modules/tickets/messages.routes";
+import { registerAiTestRoutes } from "./modules/ai/ai.routes";
+import { registerMarketplaceRoutes } from "./modules/marketplaces/marketplaces.routes";
+import { registerInboundRoutes } from "./modules/inbound/inbound.routes";
+import { registerInboundEmailWebhookRoutes } from "./modules/webhooks/inboundEmailWebhook.routes";
+import { registerInboundEmailRoutes } from "./modules/inboundEmail/inboundEmail.routes";
+import { registerOutboundRoutes } from "./modules/outbound/outbound.routes";
+import { registerOpsRoutes } from './modules/ops/ops.routes';
 
 async function bootstrap() {
-  const app = Fastify({ logger: true });
+  const app = Fastify({ 
+    logger: true,
+    bodyLimit: 1048576, // 1MB
+  });
 
+  // Register CORS and Helmet
   await app.register(cors);
   await app.register(helmet);
 
+  // Register JWT plugin (jwt.ts handles the bypass for webhooks)
+  await app.register(fastifyJwt, {
+    secret: process.env.JWT_SECRET || "fallback-secret-change-me"
+  });
+
+  // Register Swagger
   await app.register(swagger, {
     openapi: {
       info: {
@@ -30,11 +48,19 @@ async function bootstrap() {
     routePrefix: "/docs",
   });
 
+  // Register all routes (jwt.ts bypass handles webhook exception)
+  await registerInboundEmailWebhookRoutes(app);
   registerHealthRoutes(app);
   registerTenantRoutes(app);
   registerAuthRoutes(app);
   registerTicketRoutes(app);
   registerTicketMessageRoutes(app);
+  registerAiTestRoutes(app);
+  await registerMarketplaceRoutes(app);
+  await registerInboundRoutes(app);
+  await registerInboundEmailRoutes(app);
+  await registerOutboundRoutes(app);
+  await registerOpsRoutes(app);
 
   try {
     await app.listen({ port: env.PORT, host: "0.0.0.0" });

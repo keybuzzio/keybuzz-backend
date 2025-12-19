@@ -1,8 +1,8 @@
-// PH11-06B.5F: Dedicated inbound email webhook (no JWT, protected by X-Internal-Key only)
+// PH11-06B.5F + PH11-06B.6.2: Dedicated inbound email webhook with Amazon detection
 import type { FastifyInstance, FastifyPluginOptions } from "fastify";
 import { prisma } from "../../lib/db";
 import { MarketplaceType } from "@prisma/client";
-import { parseInboundAddress, processValidationEmail } from "../inbound/inbound.service";
+import { parseInboundAddress, processValidationEmail, updateMarketplaceStatusIfAmazon } from "../inbound/inbound.service";
 
 async function inboundEmailWebhookPlugin(server: FastifyInstance, _opts: FastifyPluginOptions) {
   /**
@@ -35,6 +35,7 @@ async function inboundEmailWebhookPlugin(server: FastifyInstance, _opts: Fastify
         messageId: string;
         receivedAt: string;
         body: string;
+        headers?: Record<string, string>;
       };
 
       console.log("[Webhook] Received inbound email:", {
@@ -43,17 +44,29 @@ async function inboundEmailWebhookPlugin(server: FastifyInstance, _opts: Fastify
         messageId: payload.messageId,
       });
 
+      // Parse recipient first
+      const parsed = parseInboundAddress(payload.to);
+      if (!parsed.marketplace || !parsed.tenantId) {
+        console.warn("[Webhook] Invalid recipient format:", payload.to);
+        return reply.code(400).send({ error: "Invalid recipient format" });
+      }
+
+      const { marketplace, tenantId } = parsed;
+      const country = (parsed.country || 'FR').toUpperCase();
+
+      if (marketplace.toLowerCase() !== "amazon") {
+        return reply.code(400).send({ error: "Unsupported marketplace" });
+      }
+
       // Check if validation email
       const validationResult = await processValidationEmail({
         to: payload.to,
-        subject: payload.subject || " ,
- from: payload.from,
- messageId: payload.messageId,
- headers: (payload as any).headers || {},
- rawEmail: payload.body || \,
- returnPath: (payload as any).returnPath,
- sender: (payload as any).sender,
- });
+        subject: payload.subject || "",
+        from: payload.from,
+        messageId: payload.messageId,
+        headers: payload.headers || {},
+        rawEmail: payload.body || "",
+      });
 
       if (validationResult.validated) {
         console.log(`[Webhook] Validation email processed: ${payload.messageId}`);
@@ -65,17 +78,20 @@ async function inboundEmailWebhookPlugin(server: FastifyInstance, _opts: Fastify
         });
       }
 
-      // Parse recipient
-      const parsed = parseInboundAddress(payload.to);
-      if (!parsed.marketplace || !parsed.tenantId) {
-        console.warn("[Webhook] Invalid recipient format:", payload.to);
-        return reply.code(400).send({ error: "Invalid recipient format" });
-      }
+      // For non-validation emails, check if it's an Amazon forward
+      // PH11-06B.6.2: Update marketplaceStatus if Amazon email detected
+      const amazonUpdated = await updateMarketplaceStatusIfAmazon({
+        tenantId,
+        marketplace,
+        country,
+        from: payload.from,
+        messageId: payload.messageId,
+        headers: payload.headers || {},
+        rawEmail: payload.body || "",
+      });
 
-      const { marketplace, tenantId } = parsed;
-
-      if (marketplace.toLowerCase() !== "amazon") {
-        return reply.code(400).send({ error: "Unsupported marketplace" });
+      if (amazonUpdated) {
+        console.log(`[Webhook] Amazon forward detected, marketplaceStatus updated for ${tenantId}/${country}`);
       }
 
       // Idempotence check
@@ -91,10 +107,10 @@ async function inboundEmailWebhookPlugin(server: FastifyInstance, _opts: Fastify
 
       if (existing) {
         console.log("[Webhook] Already processed:", payload.messageId);
-        return reply.send({ success: true, message: "Already processed" });
+        return reply.send({ success: true, message: "Already processed", amazonForward: amazonUpdated });
       }
 
-      // Create ExternalMessage (using correct schema fields)
+      // Create ExternalMessage
       const externalMessage = await prisma.externalMessage.create({
         data: {
           tenantId,
@@ -115,8 +131,7 @@ async function inboundEmailWebhookPlugin(server: FastifyInstance, _opts: Fastify
 
       console.log("[Webhook] ExternalMessage created:", externalMessage.id);
 
-      // Update InboundAddress lastInboundAt if exists
-      const country = (parsed.country || 'FR').toUpperCase(); // fallback
+      // Update InboundAddress lastInboundAt
       await prisma.inboundAddress.updateMany({
         where: {
           tenantId,
@@ -133,6 +148,7 @@ async function inboundEmailWebhookPlugin(server: FastifyInstance, _opts: Fastify
         success: true,
         messageId: externalMessage.id,
         externalId: payload.messageId,
+        amazonForward: amazonUpdated,
       });
 
     } catch (error) {

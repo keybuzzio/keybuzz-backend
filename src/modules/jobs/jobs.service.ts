@@ -200,3 +200,29 @@ export async function getRecentFailedJobs(limit = 20): Promise<Array<{
   });
 }
 
+
+/**
+ * Mark job for retry with exponential backoff
+ */
+export async function markJobRetry(jobId: string, error: string): Promise<void> {
+  const job = await prisma.job.findUnique({ where: { id: jobId } });
+  if (!job) return;
+
+  const nextAttempt = job.attempts + 1;
+  const backoffSeconds = Math.min(Math.pow(2, nextAttempt) * 10, 3600);
+  const nextRunAt = new Date(Date.now() + backoffSeconds * 1000);
+
+  await prisma.job.update({
+    where: { id: jobId },
+    data: {
+      status: JobStatus.RETRY,
+      attempts: nextAttempt,
+      nextRunAt,
+      lastError: error,
+      lockedAt: null,
+      lockedBy: null,
+    },
+  });
+
+  console.log("[Jobs] Job " + jobId + " scheduled for retry at " + nextRunAt.toISOString());
+}

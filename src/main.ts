@@ -12,7 +12,7 @@ import { registerAuthRoutes } from "./modules/auth/auth.routes";
 import { registerTicketRoutes } from "./modules/tickets/tickets.routes";
 import { registerTicketMessageRoutes } from "./modules/tickets/messages.routes";
 import { registerAiTestRoutes } from "./modules/ai/ai.routes";
-import { registerMarketplaceRoutes } from "./modules/marketplaces/marketplaces.routes";
+import { registerMarketplaceRoutes, registerPublicMarketplaceRoutes } from "./modules/marketplaces/marketplaces.routes";
 import { registerInboundRoutes } from "./modules/inbound/inbound.routes";
 import { registerInboundEmailWebhookRoutes } from "./modules/webhooks/inboundEmailWebhook.routes";
 import { registerInboundEmailRoutes } from "./modules/inboundEmail/inboundEmail.routes";
@@ -48,9 +48,23 @@ async function bootstrap() {
     routePrefix: "/docs",
   });
 
-  // Register all routes (jwt.ts bypass handles webhook exception)
+  // ========================================
+  // PUBLIC ROUTES (no JWT required)
+  // ========================================
+  
+  // Inbound email webhook (Postfix) - uses internal key auth
   await registerInboundEmailWebhookRoutes(app);
+  
+  // Amazon OAuth callback (public, uses state anti-CSRF)
+  await registerPublicMarketplaceRoutes(app);
+  
+  // Health check (public)
   registerHealthRoutes(app);
+
+  // ========================================
+  // AUTHENTICATED ROUTES (JWT required)
+  // ========================================
+  
   registerTenantRoutes(app);
   registerAuthRoutes(app);
   registerTicketRoutes(app);
@@ -72,4 +86,3 @@ async function bootstrap() {
 }
 
 bootstrap();
-

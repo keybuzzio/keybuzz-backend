@@ -284,63 +284,30 @@ async function inboundEmailPlugin(server: FastifyInstance, _opts: FastifyPluginO
   /**
    * GET /health/:connectionId
    */
-  /**
-   * GET /health/:connectionId
-   * Returns health status for a specific connection including Amazon Polling
-   * PH11-06B.7.1: Enhanced with amazonPolling status
-   */
   server.get("/health/:connectionId", async (request, reply) => {
-    const { connectionId } = request.params as { connectionId: string };
-
     try {
-      // Get inbound connection
+      const { connectionId } = request.params as { connectionId: string };
+      const user = request.user;
+
+      if (!user || !user.tenantId) {
+        return reply.status(403).send({ error: "Forbidden: no tenantId" });
+      }
+
       const connection = await prisma.inboundConnection.findUnique({
-        where: { id: connectionId },
-        include: {
-          addresses: true,
-        },
+        where: { id: connectionId, tenantId: user.tenantId },
       });
 
       if (!connection) {
         return reply.status(404).send({ error: "Connection not found" });
       }
 
-      // Calculate inbound health
-      const addresses = connection.addresses || [];
-      const validatedCount = addresses.filter(a => a.pipelineStatus === "VALIDATED").length;
-      const totalCount = addresses.length;
-      
-      // Get Amazon Polling health - PH11-06B.7.1
-      const amazonPolling = await getAmazonPollingHealth(connectionId);
-
-      // Determine overall status
-      let overallStatus: "OK" | "WARNING" | "ERROR" = "OK";
-      if (amazonPolling.status === "ERROR") {
-        overallStatus = "ERROR";
-      } else if (amazonPolling.status === "WARNING" || validatedCount < totalCount) {
-        overallStatus = "WARNING";
-      }
+      const indicators = await getAllHealthChecks(connectionId, user.tenantId);
 
       return reply.send({
         connectionId,
-        status: overallStatus,
-        inbound: {
-          totalAddresses: totalCount,
-          validatedAddresses: validatedCount,
-          pipelineHealthy: validatedCount === totalCount,
-        },
-        amazonPolling: {
-          status: amazonPolling.status,
-          message: amazonPolling.message,
-          oauthConnected: amazonPolling.oauthConnected,
-          lastRunAt: amazonPolling.lastRunAt || null,
-          lastSuccessAt: amazonPolling.lastSuccessAt || null,
-          lastError: amazonPolling.lastError || null,
-          reason: amazonPolling.reason || null,
-          isMockMode: amazonPolling.isMockMode,
-          jobsLast24h: amazonPolling.jobsLast24h || null,
-        },
-        timestamp: new Date().toISOString(),
+        status: connection.status,
+        actionMessage: "Check indicators for details",
+        indicators,
       });
     } catch (error) {
       console.error("[InboundEmail] Error getting health:", error);
