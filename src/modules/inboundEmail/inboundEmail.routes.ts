@@ -87,12 +87,17 @@ async function inboundEmailPlugin(server: FastifyInstance, _opts: FastifyPluginO
       }
 
       const connectionWithSummary = {
-        ...connection,
+  ...connection,
+  addresses: connection.addresses.map((a) => ({
+    ...a,
+    pipelineStatus: (a.pipelineStatus ?? (a.validationStatus === 'VALIDATED' ? 'VALIDATED' : 'PENDING')),
+    marketplaceStatus: (a.marketplaceStatus ?? 'PENDING'),
+  })),
         inboundAddressesCount: connection.addresses.length,
         validatedCount: connection.addresses.filter((a) => a.marketplaceStatus === "VALIDATED").length,
         pendingCount: connection.addresses.filter((a) => a.marketplaceStatus === "PENDING").length,
         failedCount: connection.addresses.filter((a) => a.marketplaceStatus === "FAILED").length,
-      };
+};
 
       return reply.send(connectionWithSummary);
     } catch (error) {
