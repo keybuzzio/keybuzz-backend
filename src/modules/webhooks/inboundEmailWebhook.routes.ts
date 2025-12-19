@@ -46,10 +46,14 @@ async function inboundEmailWebhookPlugin(server: FastifyInstance, _opts: Fastify
       // Check if validation email
       const validationResult = await processValidationEmail({
         to: payload.to,
-        subject: payload.subject || '',
-        from: payload.from,
-        messageId: payload.messageId,
-      });
+        subject: payload.subject || " ,
+ from: payload.from,
+ messageId: payload.messageId,
+ headers: (payload as any).headers || {},
+ rawEmail: payload.body || \,
+ returnPath: (payload as any).returnPath,
+ sender: (payload as any).sender,
+ });
 
       if (validationResult.validated) {
         console.log(`[Webhook] Validation email processed: ${payload.messageId}`);
