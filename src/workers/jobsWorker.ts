@@ -1,117 +1,88 @@
 /**
- * PH11-06C + PH11-06B.7: Jobs Worker
+ * PH11-06C: Jobs Worker - processes all job types
+ * PH11-06B.9: Added AMAZON_SEND_REPLY handler
  */
 
-import { PrismaClient, JobStatus, JobType } from '@prisma/client';
-import { claimNextJob, markJobDone, markJobFailed, markJobRetry } from '../modules/jobs/jobs.service';
-import { pollAmazonForTenant } from '../modules/marketplaces/amazon/amazon.poller';
+import { JobType, JobStatus, PrismaClient } from "@prisma/client";
+import { claimNextJob, markJobDone, markJobFailed } from "../modules/jobs/jobs.service";
+import { pollAmazonForTenant } from "../modules/marketplaces/amazon/amazon.poller";
+import { processAmazonSendReply } from "./amazonSendReplyWorker";
 
 const prisma = new PrismaClient();
-
-const WORKER_ID = `worker-${process.pid}-${Date.now()}`;
+const WORKER_ID = `worker-${process.pid}`;
 const POLL_INTERVAL_MS = 2000;
 
 /**
- * Process AMAZON_POLL job
+ * Process a single job based on type
  */
-async function processAmazonPoll(jobId: string, tenantId: string, payload: any): Promise<void> {
-  console.log(`[Worker] Processing AMAZON_POLL for tenant ${tenantId}`);
+async function processJob(job: {
+  id: string;
+  type: JobType;
+  tenantId: string;
+  payload: any;
+}): Promise<void> {
+  console.log(`[JobsWorker] Processing ${job.type} for tenant ${job.tenantId}`);
 
-  const connection = await prisma.marketplaceConnection.findFirst({
-    where: {
-      tenantId,
-      type: 'AMAZON',
-      status: 'CONNECTED',
-    },
-  });
+  switch (job.type) {
+    case "AMAZON_POLL":
+      await pollAmazonForTenant(job.tenantId);
+      break;
 
-  if (!connection) {
-    console.log(`[Worker] No CONNECTED Amazon connection for tenant ${tenantId}`);
-    return;
-  }
+    case "AMAZON_SEND_REPLY":
+      const result = await processAmazonSendReply(job.id, job.tenantId, job.payload);
+      if (!result.success) {
+        throw new Error(result.error || "Send reply failed");
+      }
+      break;
 
-  await pollAmazonForTenant(tenantId);
-}
+    case "INBOUND_EMAIL_PROCESS":
+      // TODO: Implement inbound email processing
+      console.log(`[JobsWorker] INBOUND_EMAIL_PROCESS not implemented`);
+      break;
 
-/**
- * Process a single job
- */
-async function processJob(job: { id: string; type: JobType; tenantId: string; payload: any }): Promise<void> {
-  console.log(`[Worker] Processing job ${job.id} (${job.type}) for tenant ${job.tenantId}`);
+    case "OUTBOUND_EMAIL_SEND":
+      // TODO: Implement outbound email sending
+      console.log(`[JobsWorker] OUTBOUND_EMAIL_SEND not implemented`);
+      break;
 
-  try {
-    switch (job.type) {
-      case 'AMAZON_POLL':
-        await processAmazonPoll(job.id, job.tenantId, job.payload);
-        break;
-
-      case 'OUTBOUND_EMAIL_SEND':
-        console.log(`[Worker] OUTBOUND_EMAIL_SEND - processing...`);
-        // Handled elsewhere or skip
-        break;
-
-      case 'INBOUND_EMAIL_PROCESS':
-        console.log(`[Worker] INBOUND_EMAIL_PROCESS - not implemented`);
-        break;
-
-      default:
-        console.warn(`[Worker] Unknown job type: ${job.type}`);
-    }
-
-    await markJobDone(job.id);
-    console.log(`[Worker] Job ${job.id} completed successfully`);
-
-  } catch (error: any) {
-    console.error(`[Worker] Job ${job.id} failed:`, error);
-    
-    const jobRecord = await prisma.job.findUnique({ where: { id: job.id } });
-    
-    if (jobRecord && jobRecord.attempts < jobRecord.maxAttempts) {
-      await markJobRetry(job.id, error.message || 'Unknown error');
-    } else {
-      await markJobFailed(job.id, error.message || 'Unknown error');
-    }
+    default:
+      console.warn(`[JobsWorker] Unknown job type: ${job.type}`);
   }
 }
 
 /**
- * Worker loop
+ * Main worker loop
  */
-async function workerLoop(): Promise<void> {
-  console.log(`[Worker] Starting jobs worker (ID: ${WORKER_ID})`);
+async function runWorker(): Promise<void> {
+  console.log(`[JobsWorker] Starting worker ${WORKER_ID}`);
 
   while (true) {
     try {
       const job = await claimNextJob(WORKER_ID);
 
       if (job) {
-        await processJob(job);
-      } else {
-        await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+        try {
+          await processJob(job);
+          await markJobDone(job.id);
+          console.log(`[JobsWorker] Job ${job.id} completed`);
+        } catch (error) {
+          console.error(`[JobsWorker] Job ${job.id} failed:`, error);
+          await markJobFailed(job.id, (error as Error).message);
+        }
       }
+
+      // Wait before next poll
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
     } catch (error) {
-      console.error('[Worker] Error in worker loop:', error);
-      await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS * 2));
+      console.error("[JobsWorker] Error in worker loop:", error);
+      await new Promise((resolve) => setTimeout(resolve, 5000));
     }
   }
 }
 
-async function main() {
-  console.log('[Worker] Jobs Worker starting...');
-  await workerLoop();
+// Start worker if run directly
+if (require.main === module) {
+  runWorker().catch(console.error);
 }
 
-process.on('SIGTERM', async () => {
-  await prisma.$disconnect();
-  process.exit(0);
-});
-
-process.on('SIGINT', async () => {
-  await prisma.$disconnect();
-  process.exit(0);
-});
-
-main().catch(err => {
-  console.error('[Worker] Fatal error:', err);
-  process.exit(1);
-});
+export { processJob, runWorker };

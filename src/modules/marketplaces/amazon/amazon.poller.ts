@@ -46,8 +46,8 @@ export async function pollAmazonForTenant(tenantId: string): Promise<void> {
     }
 
     // 3. Fetch messages from Amazon (real or mock)
-    const useMock = process.env.AMAZON_USE_MOCK === "true";
-    const client = await createAmazonClient(tenantId, useMock);
+    
+    const client = await createAmazonClient(tenantId);
     const result = await client.fetchInboundMessages({
       since: syncState.lastSuccessAt || undefined,
       cursor: syncState.cursor || undefined,

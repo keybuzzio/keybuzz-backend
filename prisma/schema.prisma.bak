@@ -546,7 +546,6 @@ model OutboundEmail {
 // ---------------------------
 
 enum JobType {
-  AMAZON_SEND_REPLY
   INBOUND_EMAIL_PROCESS
   OUTBOUND_EMAIL_SEND
   AMAZON_POLL
@@ -638,40 +637,4 @@ enum InboundConnectionStatus {
   READY               // Tout opérationnel
   DEGRADED            // Partiellement opérationnel (warnings)
   ERROR               // Erreur critique
-}
-
-// ============================================
-// PH11-06B.9 - Amazon Write-Back
-// ============================================
-
-enum OutboundMessageStatus {
-  PENDING
-  SENT
-  FAILED
-}
-
-model MarketplaceOutboundMessage {
-  id                String                 @id @default(cuid())
-  tenantId          String
-  connectionId      String?                // MarketplaceConnection
-  ticketId          String?
-  channel           TicketChannel          @default(AMAZON)
-  marketplaceType   MarketplaceType        @default(AMAZON)
-  externalThreadId  String?                // Amazon order/thread ID
-  orderId           String?
-  toAddress         String
-  subject           String?
-  body              String                 @db.Text
-  bodyHash          String                 // SHA256 for idempotence
-  status            OutboundMessageStatus  @default(PENDING)
-  providerMessageId String?                // Amazon message ID
-  error             String?                @db.Text
-  attempts          Int                    @default(0)
-  createdAt         DateTime               @default(now())
-  sentAt            DateTime?
-  updatedAt         DateTime               @updatedAt
-
-  @@unique([connectionId, ticketId, bodyHash])
-  @@index([tenantId, status])
-  @@index([ticketId])
 }

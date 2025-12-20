@@ -1,0 +1,282 @@
+// src/modules/marketplaces/amazon/amazon.spapi.ts
+// PH11-06B.9 - Amazon SP-API Messaging client
+
+import { createHash, createHmac } from "crypto";
+import { getAccessToken } from "./amazon.tokens";
+import { getAmazonTenantCredentials } from "./amazon.vault";
+
+/**
+ * SP-API endpoints by region
+ */
+const SPAPI_ENDPOINTS: Record<string, string> = {
+  "eu-west-1": "https://sellingpartnerapi-eu.amazon.com",
+  "us-east-1": "https://sellingpartnerapi-na.amazon.com",
+  "us-west-2": "https://sellingpartnerapi-fe.amazon.com",
+};
+
+/**
+ * AWS credentials for SigV4
+ */
+async function getAwsCredentials(): Promise<{
+  accessKeyId: string;
+  secretAccessKey: string;
+}> {
+  const accessKeyId = process.env.AWS_ACCESS_KEY_ID || "";
+  const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY || "";
+  
+  if (!accessKeyId || !secretAccessKey) {
+    throw new Error("AWS credentials not configured");
+  }
+  
+  return { accessKeyId, secretAccessKey };
+}
+
+/**
+ * AWS SigV4 signature generation
+ */
+function generateAwsSignature(params: {
+  method: string;
+  host: string;
+  path: string;
+  queryString: string;
+  headers: Record<string, string>;
+  payload: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  region: string;
+  service: string;
+}): { authorization: string; amzDate: string } {
+  const {
+    method,
+    host,
+    path,
+    queryString,
+    headers,
+    payload,
+    accessKeyId,
+    secretAccessKey,
+    region,
+    service,
+  } = params;
+
+  const date = new Date();
+  const amzDate = date.toISOString().replace(/[:-]|\.\d{3}/g, "").substring(0, 15) + "Z";
+  const dateStamp = amzDate.substring(0, 8);
+
+  // Add required headers
+  const allHeaders: Record<string, string> = {
+    ...headers,
+    host,
+    "x-amz-date": amzDate,
+  };
+
+  // Canonical request
+  const sortedHeaderKeys = Object.keys(allHeaders).sort();
+  const canonicalHeaders = sortedHeaderKeys
+    .map((key) => `${key.toLowerCase()}:${allHeaders[key].trim()}\n`)
+    .join("");
+  const signedHeaders = sortedHeaderKeys.map((key) => key.toLowerCase()).join(";");
+  const payloadHash = createHash("sha256").update(payload).digest("hex");
+
+  const canonicalRequest = [
+    method,
+    path,
+    queryString,
+    canonicalHeaders,
+    signedHeaders,
+    payloadHash,
+  ].join("\n");
+
+  // String to sign
+  const algorithm = "AWS4-HMAC-SHA256";
+  const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
+  const canonicalRequestHash = createHash("sha256")
+    .update(canonicalRequest)
+    .digest("hex");
+
+  const stringToSign = [
+    algorithm,
+    amzDate,
+    credentialScope,
+    canonicalRequestHash,
+  ].join("\n");
+
+  // Signing key
+  const kDate = createHmac("sha256", `AWS4${secretAccessKey}`)
+    .update(dateStamp)
+    .digest();
+  const kRegion = createHmac("sha256", kDate).update(region).digest();
+  const kService = createHmac("sha256", kRegion).update(service).digest();
+  const kSigning = createHmac("sha256", kService)
+    .update("aws4_request")
+    .digest();
+
+  const signature = createHmac("sha256", kSigning)
+    .update(stringToSign)
+    .digest("hex");
+
+  const authorization = `${algorithm} Credential=${accessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+
+  return { authorization, amzDate };
+}
+
+/**
+ * Check if Amazon OAuth is connected
+ */
+export async function checkMessagingCapabilities(tenantId: string): Promise<{
+  connected: boolean;
+  hasMessagingScope: boolean;
+  error?: string;
+}> {
+  try {
+    const creds = await getAmazonTenantCredentials(tenantId);
+    if (!creds) {
+      return { connected: false, hasMessagingScope: false, error: "oauth_not_connected" };
+    }
+
+    const accessToken = await getAccessToken(tenantId);
+    if (!accessToken) {
+      return { connected: false, hasMessagingScope: false, error: "token_refresh_failed" };
+    }
+
+    return { connected: true, hasMessagingScope: true };
+  } catch (error) {
+    console.error("[SP-API] Capabilities check failed:", error);
+    return { connected: false, hasMessagingScope: false, error: (error as Error).message };
+  }
+}
+
+/**
+ * Send message to buyer via SP-API Messaging
+ */
+export async function sendBuyerMessage(params: {
+  tenantId: string;
+  amazonOrderId: string;
+  message: string;
+  marketplaceId?: string;
+}): Promise<{
+  success: boolean;
+  messageId?: string;
+  error?: string;
+  errorCode?: string;
+}> {
+  const { tenantId, amazonOrderId, message, marketplaceId = "A13V1IB3VIYZZH" } = params;
+
+  console.log(`[SP-API] sendBuyerMessage for tenant ${tenantId}, order ${amazonOrderId}`);
+
+  try {
+    // Check capabilities
+    const caps = await checkMessagingCapabilities(tenantId);
+    if (!caps.connected) {
+      return { success: false, error: caps.error, errorCode: "OAUTH_NOT_CONNECTED" };
+    }
+
+    // Get credentials
+    const creds = await getAmazonTenantCredentials(tenantId);
+    if (!creds) {
+      return { success: false, error: "No credentials", errorCode: "NO_CREDENTIALS" };
+    }
+
+    // Get access token
+    const accessToken = await getAccessToken(tenantId);
+    if (!accessToken) {
+      return { success: false, error: "Token refresh failed", errorCode: "TOKEN_REFRESH_FAILED" };
+    }
+
+    // Prepare request
+    const region = creds.region || "eu-west-1";
+    const endpoint = SPAPI_ENDPOINTS[region] || SPAPI_ENDPOINTS["eu-west-1"];
+    const host = new URL(endpoint).host;
+    
+    const path = `/messaging/v1/orders/${encodeURIComponent(amazonOrderId)}/messages/confirmCustomizationDetails`;
+    const queryString = `marketplaceIds=${marketplaceId}`;
+    
+    const body = JSON.stringify({
+      text: message,
+      attachments: []
+    });
+
+    // Sign request
+    const awsCreds = await getAwsCredentials();
+    const { authorization, amzDate } = generateAwsSignature({
+      method: "POST",
+      host,
+      path,
+      queryString,
+      headers: {
+        "content-type": "application/json",
+        "x-amz-access-token": accessToken,
+      },
+      payload: body,
+      accessKeyId: awsCreds.accessKeyId,
+      secretAccessKey: awsCreds.secretAccessKey,
+      region,
+      service: "execute-api",
+    });
+
+    // Make request
+    const url = `${endpoint}${path}?${queryString}`;
+    console.log(`[SP-API] Calling ${url}`);
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-amz-access-token": accessToken,
+        "x-amz-date": amzDate,
+        "Authorization": authorization,
+      },
+      body,
+    });
+
+    const responseText = await response.text();
+    console.log(`[SP-API] Response: ${response.status} - ${responseText.substring(0, 200)}`);
+
+    if (!response.ok) {
+      let errorData;
+      try {
+        errorData = JSON.parse(responseText);
+      } catch {
+        errorData = { message: responseText };
+      }
+
+      if (response.status === 403) {
+        return { success: false, error: "Not authorized for messaging API", errorCode: "NOT_AUTHORIZED" };
+      }
+      if (response.status === 404) {
+        return { success: false, error: "Order not found", errorCode: "ORDER_NOT_FOUND" };
+      }
+
+      return { 
+        success: false, 
+        error: errorData.message || `HTTP ${response.status}`,
+        errorCode: `HTTP_${response.status}`
+      };
+    }
+
+    let result;
+    try {
+      result = JSON.parse(responseText);
+    } catch {
+      result = {};
+    }
+
+    return { 
+      success: true, 
+      messageId: result.confirmationId || result.messageId || `sent-${Date.now()}`
+    };
+  } catch (error) {
+    console.error("[SP-API] sendBuyerMessage error:", error);
+    return { 
+      success: false, 
+      error: (error as Error).message,
+      errorCode: "INTERNAL_ERROR"
+    };
+  }
+}
+
+// Stub for backward compatibility with amazon.client.ts
+export async function fetchBuyerMessages(tenantId: string): Promise<any[]> {
+  console.log(`[SP-API] fetchBuyerMessages stub called for ${tenantId}`);
+  return [];
+}
