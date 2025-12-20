@@ -1,8 +1,9 @@
 // src/modules/marketplaces/amazon/amazon.spapi.ts
-// Amazon SP-API Buyer Communications client
+// PH11-06B.9: Amazon SP-API Buyer Communications client
 
 import { createHash, createHmac } from "crypto";
 import { getAccessToken } from "./amazon.tokens";
+import { getAmazonTenantCredentials } from "./amazon.vault";
 import type { AmazonInboundMessage } from "./amazon.types";
 
 const SPAPI_ENDPOINTS: Record<string, string> = {
@@ -11,273 +12,136 @@ const SPAPI_ENDPOINTS: Record<string, string> = {
   "us-west-2": "https://sellingpartnerapi-fe.amazon.com",
 };
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function generateAwsSignature(params: {
-  method: string;
-  host: string;
-  path: string;
-  queryString: string;
-  headers: Record<string, string>;
-  payload: string;
-  accessKeyId: string;
-  secretAccessKey: string;
-  region: string;
-  service: string;
-}): string {
-  const {
-    method,
-    path,
-    queryString,
-    headers,
-    payload,
-    accessKeyId,
-    secretAccessKey,
-    region,
-    service,
-  } = params;
-
-  const date = new Date();
-  const amzDate = date.toISOString().replace(/[:.-]|\.\d{3}/g, "");
-  const dateStamp = amzDate.substring(0, 8);
-
-  const canonicalUri = path;
-  const canonicalQueryString = queryString;
-  const canonicalHeaders = Object.keys(headers)
-    .sort()
-    .map((key) => `${key.toLowerCase()}:${headers[key].trim()}\n`)
-    .join("");
-  const signedHeaders = Object.keys(headers)
-    .sort()
-    .map((key) => key.toLowerCase())
-    .join(";");
-
-  const payloadHash = createHash("sha256").update(payload).digest("hex");
-
-  const canonicalRequest = [
-    method,
-    canonicalUri,
-    canonicalQueryString,
-    canonicalHeaders,
-    signedHeaders,
-    payloadHash,
-  ].join("\n");
-
-  const algorithm = "AWS4-HMAC-SHA256";
-  const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
-  const canonicalRequestHash = createHash("sha256")
-    .update(canonicalRequest)
-    .digest("hex");
-
-  const stringToSign = [
-    algorithm,
-    amzDate,
-    credentialScope,
-    canonicalRequestHash,
-  ].join("\n");
-
-  const kDate = createHmac("sha256", `AWS4${secretAccessKey}`)
-    .update(dateStamp)
-    .digest();
-  const kRegion = createHmac("sha256", kDate).update(region).digest();
-  const kService = createHmac("sha256", kRegion).update(service).digest();
-  const kSigning = createHmac("sha256", kService)
-    .update("aws4_request")
-    .digest();
-
-  const signature = createHmac("sha256", kSigning)
-    .update(stringToSign)
-    .digest("hex");
-
-  return `${algorithm} Credential=${accessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
-}
-
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-async function callSpApi(params: {
-  endpoint: string;
-  path: string;
-  accessToken: string;
-  roleArn: string;
-  region: string;
-  method?: string;
-  queryParams?: Record<string, string>;
-}): Promise<unknown> {
-  const {
-    endpoint,
-    path,
-    accessToken,
-    method = "GET",
-    queryParams = {},
-  } = params;
-
-  const url = new URL(path, endpoint);
-  Object.entries(queryParams).forEach(([key, value]) => {
-    url.searchParams.append(key, value);
-  });
-
-  const headers: Record<string, string> = {
-    Host: url.hostname,
-    "x-amz-access-token": accessToken,
-    "x-amz-date": new Date().toISOString().replace(/[:.-]|\.\d{3}/g, ""),
-    "Content-Type": "application/json",
-  };
-
-  const response = await fetch(url.toString(), {
-    method,
-    headers,
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    console.error(
-      `[Amazon SP-API] API call failed: ${response.status} - ${errorText}`
-    );
-    throw new Error(`SP-API call failed: ${response.status}`);
-  }
-
-  return response.json();
-}
-
-export async function fetchBuyerMessages(params: {
-  refreshToken: string;
-  roleArn: string;
-  region: string;
-  marketplaceId: string;
-  since?: Date;
-}): Promise<AmazonInboundMessage[]> {
-  const { refreshToken, marketplaceId, since } = params;
-
-  await getAccessToken(refreshToken);
-
-  const queryParams: Record<string, string> = {
-    marketplaceIds: marketplaceId,
-  };
-
-  if (since) {
-    queryParams.createdAfter = since.toISOString();
-  }
-
-  console.log(
-    `[Amazon SP-API] Would fetch messages with params:`,
-    queryParams
-  );
-
-  return [];
-}
-
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function normalizeSpApiMessage(rawMessage: {
-  messageId: string;
-  locale?: string;
-  text: string;
-  createdDate: string;
-  [key: string]: unknown;
-}): AmazonInboundMessage {
-  return {
-    externalId: rawMessage.messageId,
-    threadId: rawMessage.messageId,
-    orderId: undefined,
-    buyerName: undefined,
-    buyerEmail: undefined,
-    language: rawMessage.locale || "en",
-    receivedAt: rawMessage.createdDate,
-    subject: undefined,
-    body: rawMessage.text,
-    raw: rawMessage,
-  };
-}
-
 /**
- * PH11-06B.9 - Send message to buyer via SP-API Messaging
+ * Send buyer message via SP-API Messaging API
+ * https://developer-docs.amazon.com/sp-api/docs/messaging-api-v1-reference
  */
-export interface SendBuyerMessageParams {
+export async function sendBuyerMessage(params: {
   tenantId: string;
-  amazonOrderId: string;
+  orderId: string;
   message: string;
-  marketplaceId?: string;
-}
+  subject?: string;
+}): Promise<{ success: boolean; messageId?: string; error?: string }> {
+  const { tenantId, orderId, message, subject } = params;
 
-export interface SendBuyerMessageResult {
-  success: boolean;
-  messageId?: string;
-  error?: string;
-}
+  console.log(`[SP-API] Sending buyer message for order ${orderId}`);
 
-export async function sendBuyerMessage(
-  params: SendBuyerMessageParams
-): Promise<SendBuyerMessageResult> {
-  const { tenantId, amazonOrderId, message, marketplaceId } = params;
-  console.log(`[SP-API] sendBuyerMessage for tenant ${tenantId}, order ${amazonOrderId}`);
+  // 1. Get tenant credentials from Vault
+  const creds = await getAmazonTenantCredentials(tenantId);
+  if (!creds || !creds.refresh_token) {
+    throw new Error("Amazon OAuth not connected - no refresh token");
+  }
+
+  // 2. Get access token
+  const accessToken = await getAccessToken(creds.refresh_token);
+
+  // 3. Build SP-API request
+  const region = creds.region || "eu-west-1";
+  const endpoint = SPAPI_ENDPOINTS[region] || SPAPI_ENDPOINTS["eu-west-1"];
+  const marketplaceId = creds.marketplace_id || "A13V1IB3VIYZZH"; // Amazon.fr
+
+  // SP-API Messaging endpoint (createConfirmCustomizationDetails or sendInvoice etc.)
+  // Using "confirmCustomizationDetails" which allows free-form messaging for certain cases
+  // Or we can use "createNegativeFeedbackRemoval" or "sendInvoice" depending on use case
+  
+  // For buyer messaging, the most appropriate is:
+  // POST /messaging/v1/orders/{amazonOrderId}/messages/confirmCustomizationDetails
+  // But this requires specific permissions and order context
+  
+  // Alternative: Use Seller Central API proxy (not SP-API) if messaging not available
+  // For now, we implement with proper error handling
+
+  const path = `/messaging/v1/orders/${orderId}/messages`;
+  const url = `${endpoint}${path}`;
+
+  const requestBody = {
+    text: message,
+    marketplaceIds: [marketplaceId],
+  };
 
   try {
-    // Mock mode for testing
-    if (process.env.AMAZON_SP_API_MOCK === "true") {
-      const mockMessageId = `amzn-mock-${Date.now()}`;
-      console.log(`[SP-API] Mock mode: returning success with messageId ${mockMessageId}`);
-      return {
-        success: true,
-        messageId: mockMessageId,
-      };
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-amz-access-token": accessToken,
+        "x-amz-date": new Date().toISOString().replace(/[:-]|\.\d{3}/g, ""),
+      },
+      body: JSON.stringify(requestBody),
+    });
+
+    const responseText = await response.text();
+    console.log(`[SP-API] Response ${response.status}: ${responseText.substring(0, 200)}`);
+
+    if (!response.ok) {
+      // Parse error
+      let errorDetails = responseText;
+      try {
+        const errorJson = JSON.parse(responseText);
+        errorDetails = errorJson.errors?.[0]?.message || errorJson.message || responseText;
+      } catch {}
+
+      // Check for specific errors
+      if (response.status === 403) {
+        throw new Error(`SP-API Forbidden: Messaging scope not authorized. ${errorDetails}`);
+      }
+      if (response.status === 404) {
+        throw new Error(`SP-API: Order ${orderId} not found or messaging not available. ${errorDetails}`);
+      }
+      if (response.status === 429) {
+        throw new Error(`SP-API Rate limit exceeded. Retry later.`);
+      }
+
+      throw new Error(`SP-API Error ${response.status}: ${errorDetails}`);
     }
 
-    // Check for credentials (in production, would come from Vault)
-    const hasCredentials = process.env.AMAZON_SP_API_ENABLED === "true";
-    
-    if (!hasCredentials) {
-      console.log(`[SP-API] No Amazon credentials for tenant ${tenantId}`);
-      return {
-        success: false,
-        error: "oauth_not_connected",
-      };
-    }
+    // Parse success response
+    let messageId: string | undefined;
+    try {
+      const data = JSON.parse(responseText);
+      messageId = data.messageId || data.confirmationId || data.id;
+    } catch {}
 
-    // Build SP-API request
-    const endpoint = SPAPI_ENDPOINTS["eu-west-1"];
-    const path = `/messaging/v1/orders/${encodeURIComponent(amazonOrderId)}/messages`;
-    
-    const requestBody = {
-      text: message,
-      marketplaceId: marketplaceId || "A1PA6795UKMFR9",
-    };
-
-    console.log(`[SP-API] Would call: POST ${endpoint}${path}`);
-    console.log(`[SP-API] Body:`, JSON.stringify(requestBody));
-
-    // TODO: Implement actual SP-API call
     return {
-      success: false,
-      error: "oauth_not_connected",
+      success: true,
+      messageId,
     };
+
   } catch (error) {
-    console.error(`[SP-API] Error sending message:`, error);
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : String(error),
-    };
+    console.error(`[SP-API] sendBuyerMessage failed:`, error);
+    throw error;
   }
 }
 
 /**
- * Check if tenant has messaging capabilities (OAuth connected)
+ * Check if tenant has messaging capability
  */
-export async function checkMessagingCapabilities(tenantId: string): Promise<{
-  canSend: boolean;
+export async function checkMessagingCapability(tenantId: string): Promise<{
+  available: boolean;
   reason?: string;
 }> {
-  // Check mock mode first
-  if (process.env.AMAZON_SP_API_MOCK === "true") {
-    return { canSend: true };
-  }
-  
-  // Check if credentials are configured
-  const hasCredentials = process.env.AMAZON_SP_API_ENABLED === "true";
-  
-  if (!hasCredentials) {
-    // In dev mode, allow sending (will fail at send time with clear error)
-    if (process.env.NODE_ENV !== "production") {
-      return { canSend: true };
+  try {
+    const creds = await getAmazonTenantCredentials(tenantId);
+    if (!creds || !creds.refresh_token) {
+      return { available: false, reason: "oauth_not_connected" };
     }
-    return { canSend: false, reason: "oauth_not_connected" };
+
+    // Try to get access token (validates refresh token)
+    await getAccessToken(creds.refresh_token);
+
+    // TODO: Call SP-API getMessagingActionsForOrder to check actual capabilities
+    // For now, assume connected = can try to send
+
+    return { available: true };
+
+  } catch (error) {
+    const msg = (error as Error).message;
+    if (msg.includes("Failed to refresh")) {
+      return { available: false, reason: "token_refresh_failed" };
+    }
+    return { available: false, reason: msg };
   }
-  
-  return { canSend: true };
 }
+
+// Export types
+export type { AmazonInboundMessage };

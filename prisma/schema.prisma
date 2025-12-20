@@ -243,6 +243,8 @@ enum TicketEventType {
   AI_REPLY_SENT
   AI_RULE_EXECUTED
   TICKET_AUTO_CLOSED
+  OUTBOUND_SENT
+  OUTBOUND_FAILED
 }
 
 enum EventActorType {
@@ -525,7 +527,7 @@ model OutboundEmail {
   id        String                 @id @default(cuid())
   tenantId  String
   ticketId  String
-  to        String
+  toAddress String
   from      String
   subject   String
   body      String                 @db.Text
@@ -588,13 +590,13 @@ enum InboundValidationStatus {
 }
 
 model InboundConnection {
-  id          String                      @id @default(cuid())
+  id          String                  @id @default(cuid())
   tenantId    String
   marketplace String
   countries   Json
   status      InboundConnectionStatus @default(DRAFT)
-  createdAt   DateTime                    @default(now())
-  updatedAt   DateTime                    @updatedAt
+  createdAt   DateTime                @default(now())
+  updatedAt   DateTime                @updatedAt
 
   tenant    Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   addresses InboundAddress[]
@@ -632,12 +634,12 @@ model InboundAddress {
 
 // PH11-06B.5C: Inbound Connection Status
 enum InboundConnectionStatus {
-  DRAFT               // Juste créé, pas encore configuré
-  WAITING_EMAIL       // En attente validation email
-  WAITING_AMAZON      // Email OK, mais Amazon pas connecté
-  READY               // Tout opérationnel
-  DEGRADED            // Partiellement opérationnel (warnings)
-  ERROR               // Erreur critique
+  DRAFT // Juste créé, pas encore configuré
+  WAITING_EMAIL // En attente validation email
+  WAITING_AMAZON // Email OK, mais Amazon pas connecté
+  READY // Tout opérationnel
+  DEGRADED // Partiellement opérationnel (warnings)
+  ERROR // Erreur critique
 }
 
 // ============================================
@@ -651,25 +653,25 @@ enum OutboundMessageStatus {
 }
 
 model MarketplaceOutboundMessage {
-  id                String                 @id @default(cuid())
+  id                String                @id @default(cuid())
   tenantId          String
-  connectionId      String?                // MarketplaceConnection
+  connectionId      String? // MarketplaceConnection
   ticketId          String?
-  channel           TicketChannel          @default(AMAZON)
-  marketplaceType   MarketplaceType        @default(AMAZON)
-  externalThreadId  String?                // Amazon order/thread ID
+  channel           TicketChannel         @default(AMAZON)
+  marketplaceType   MarketplaceType       @default(AMAZON)
+  externalThreadId  String? // Amazon order/thread ID
   orderId           String?
   toAddress         String
   subject           String?
-  body              String                 @db.Text
-  bodyHash          String                 // SHA256 for idempotence
-  status            OutboundMessageStatus  @default(PENDING)
-  providerMessageId String?                // Amazon message ID
-  error             String?                @db.Text
-  attempts          Int                    @default(0)
-  createdAt         DateTime               @default(now())
+  body              String                @db.Text
+  bodyHash          String // SHA256 for idempotence
+  status            OutboundMessageStatus @default(PENDING)
+  providerMessageId String? // Amazon message ID
+  error             String?               @db.Text
+  attempts          Int                   @default(0)
+  createdAt         DateTime              @default(now())
   sentAt            DateTime?
-  updatedAt         DateTime               @updatedAt
+  updatedAt         DateTime              @updatedAt
 
   @@unique([connectionId, ticketId, bodyHash])
   @@index([tenantId, status])

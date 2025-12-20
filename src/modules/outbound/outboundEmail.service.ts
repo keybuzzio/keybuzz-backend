@@ -1,324 +1,195 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-/* eslint-disable no-undef */
-// src/modules/outbound/outboundEmail.service.ts
-import { PrismaClient } from '@prisma/client';
-import { prisma } from "../../lib/db";
-import { OutboundEmailProvider, OutboundEmailStatus } from "@prisma/client";
-import nodemailer from "nodemailer";
-import { SESClient, SendEmailCommand } from "@aws-sdk/client-ses";
+/**
+ * PH11-06B.3 Outbound Email Service
+ * Handles sending emails (SMTP or SES)
+ */
 
-// Vault helper (réutiliser celui d'Amazon si disponible, sinon créer un générique)
-import { getVaultSecret, getVaultObject } from "../../lib/vault";
+import { PrismaClient, OutboundEmailStatus } from "@prisma/client";
+import nodemailer from "nodemailer";
+import type { Transporter } from "nodemailer";
+
+const prisma = new PrismaClient();
 
 export interface SendEmailPayload {
   tenantId: string;
   ticketId: string;
-  to: string;
+  toAddress: string;
   from?: string;
   subject: string;
   body: string;
 }
 
-export interface SendEmailResult {
-  success: boolean;
-  provider: OutboundEmailProvider;
-  outboundEmailId: string;
-  error?: string;
+// SMTP transporter (lazy init)
+let smtpTransporter: Transporter | null = null;
+
+function getSmtpTransporter(): Transporter {
+  if (!smtpTransporter) {
+    smtpTransporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST || "localhost",
+      port: parseInt(process.env.SMTP_PORT || "587"),
+      secure: process.env.SMTP_SECURE === "true",
+      auth: process.env.SMTP_USER && process.env.SMTP_PASS ? {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS,
+      } : undefined,
+    });
+  }
+  return smtpTransporter;
 }
 
 /**
- * Send email with SMTP first, fallback to SES
+ * Send email (creates record + sends)
  */
-export async function sendEmail(payload: SendEmailPayload): Promise<SendEmailResult> {
-  const { tenantId, ticketId, to, subject, body } = payload;
-  const from = payload.from || "amazon@inbound.keybuzz.io";
+export async function sendEmail(payload: SendEmailPayload): Promise<{
+  id: string;
+  status: OutboundEmailStatus;
+  error?: string;
+}> {
+  const { tenantId, ticketId, toAddress, from, subject, body } = payload;
+  const fromAddress = from || process.env.SMTP_FROM || "noreply@keybuzz.io";
 
-  // Create OutboundEmail record
+  // Create outbound email record
   const outboundEmail = await prisma.outboundEmail.create({
     data: {
       tenantId,
       ticketId,
-      to,
-      from,
+      toAddress,
+      from: fromAddress,
       subject,
       body,
       status: OutboundEmailStatus.PENDING,
     },
   });
 
-  // Try SMTP first
+  // Try to send
   try {
-    await sendViaSMTP({ to, from, subject, body });
+    const provider = process.env.EMAIL_PROVIDER || "smtp";
+    
+    if (provider === "ses") {
+      await sendViaSES({
+        toAddress,
+        from: fromAddress,
+        subject,
+        body,
+      });
+    } else {
+      await sendViaSMTP({
+        toAddress,
+        from: fromAddress,
+        subject,
+        body,
+      });
+    }
 
-    // Update status
+    // Mark as sent
     await prisma.outboundEmail.update({
       where: { id: outboundEmail.id },
       data: {
         status: OutboundEmailStatus.SENT,
-        provider: OutboundEmailProvider.SMTP,
         sentAt: new Date(),
+        provider: provider as any,
       },
     });
 
-    return {
-      success: true,
-      provider: OutboundEmailProvider.SMTP,
-      outboundEmailId: outboundEmail.id,
-    };
-  } catch (smtpError: any) {
-    console.error("[Outbound Email] SMTP failed:", smtpError.message);
+    return { id: outboundEmail.id, status: OutboundEmailStatus.SENT };
+  } catch (error) {
+    const errorMsg = (error as Error).message;
+    
+    await prisma.outboundEmail.update({
+      where: { id: outboundEmail.id },
+      data: {
+        status: OutboundEmailStatus.FAILED,
+        error: errorMsg,
+      },
+    });
 
-    // Fallback to SES
-    try {
-      await sendViaSES({ to, from, subject, body });
-
-      // Update status
-      await prisma.outboundEmail.update({
-        where: { id: outboundEmail.id },
-        data: {
-          status: OutboundEmailStatus.SENT,
-          provider: OutboundEmailProvider.SES,
-          sentAt: new Date(),
-        },
-      });
-
-      console.log("[Outbound Email] ✓ Sent via SES fallback");
-
-      return {
-        success: true,
-        provider: OutboundEmailProvider.SES,
-        outboundEmailId: outboundEmail.id,
-      };
-    } catch (sesError: any) {
-      console.error("[Outbound Email] SES failed:", sesError.message);
-
-      // Update status as failed
-      await prisma.outboundEmail.update({
-        where: { id: outboundEmail.id },
-        data: {
-          status: OutboundEmailStatus.FAILED,
-          error: `SMTP: ${smtpError.message}; SES: ${sesError.message}`,
-        },
-      });
-
-      return {
-        success: false,
-        provider: OutboundEmailProvider.SMTP, // tried first
-        outboundEmailId: outboundEmail.id,
-        error: `Both SMTP and SES failed`,
-      };
-    }
+    return { id: outboundEmail.id, status: OutboundEmailStatus.FAILED, error: errorMsg };
   }
 }
 
 /**
- * Send via SMTP (Postfix mail-core-01)
+ * Send via SMTP
  */
-async function sendViaSMTP(email: { to: string; from: string; subject: string; body: string }) {
-  // Get SMTP credentials from Vault
-  const smtp = await getVaultObject("smtp");
-  const smtpHost = smtp.host || process.env.SMTP_HOST || "10.0.0.160"; // mail-core-01
-  const smtpPort = parseInt((smtp.port || process.env.SMTP_PORT || "587").toString());
-  const smtpUser = smtp.user;
-  const smtpPass = smtp.password;
-
-const transportConfig: any = {
-    host: smtpHost,
-    port: smtpPort,
-    secure: false,
-    connectionTimeout: 10000,
-    tls: {
-      rejectUnauthorized: false, // Accept self-signed cert
-    },
-  };
-
-  // For port 25 (internal relay), disable TLS completely
-  if (smtpPort === 25) {
-    transportConfig.ignoreTLS = true;
-    delete transportConfig.tls;
-  }
-
-  // Only add auth if user/password are provided (skip for internal relay)
-  if (smtpUser && smtpPass) {
-    transportConfig.auth = {
-      user: smtpUser,
-      pass: smtpPass,
-    };
-  }
-
-  const transporter = nodemailer.createTransport(transportConfig);
-
+async function sendViaSMTP(email: { toAddress: string; from: string; subject: string; body: string }) {
+  const transporter = getSmtpTransporter();
+  
   await transporter.sendMail({
+    to: email.toAddress,
     from: email.from,
-    to: email.to,
     subject: email.subject,
-    text: email.body,
+    html: email.body,
   });
 }
 
 /**
- * Send via Amazon SES
+ * Send via AWS SES
  */
-async function sendViaSES(email: { to: string; from: string; subject: string; body: string }) {
-  // Get SES credentials from Vault
-  const ses = await getVaultObject("ses");
-  const accessKeyId = ses.access_key;
-  const secretAccessKey = ses.secret_key;
-  const region = ses.region || "eu-west-1";
-
-  const sesClient = new SESClient({
-    region,
-    credentials: {
-      accessKeyId,
-      secretAccessKey,
-    },
-  });
-
-  const command = new SendEmailCommand({
-    Source: email.from,
-    Destination: {
-      ToAddresses: [email.to],
-    },
-    Message: {
-      Subject: {
-        Data: email.subject,
-        Charset: "UTF-8",
-      },
-      Body: {
-        Text: {
-          Data: email.body,
-          Charset: "UTF-8",
-        },
-      },
-    },
-  });
-
-  await sesClient.send(command);
+async function sendViaSES(email: { toAddress: string; from: string; subject: string; body: string }) {
+  console.log("[OutboundEmail] SES not implemented, falling back to SMTP");
+  await sendViaSMTP(email);
 }
 
 /**
- * Get recent outbound emails for a ticket (for rate limiting)
+ * Get outbound email by ID
  */
-export async function getRecentOutboundEmails(
-  ticketId: string,
-  hours: number = 1
-): Promise<number> {
-  const since = new Date();
-  since.setHours(since.getHours() - hours);
-
-  const count = await prisma.outboundEmail.count({
-    where: {
-      ticketId,
-      createdAt: {
-        gte: since,
-      },
-      status: {
-        in: [OutboundEmailStatus.SENT, OutboundEmailStatus.PENDING],
-      },
-    },
-  });
-
-  return count;
+export async function getOutboundEmail(id: string) {
+  return prisma.outboundEmail.findUnique({ where: { id } });
 }
 
 /**
- * Get recent outbound emails for a tenant (for rate limiting)
+ * List outbound emails for ticket
  */
-export async function getRecentTenantOutboundEmails(
-  tenantId: string,
-  hours: number = 1
-): Promise<number> {
-  const since = new Date();
-  since.setHours(since.getHours() - hours);
-
-  const count = await prisma.outboundEmail.count({
-    where: {
-      tenantId,
-      createdAt: {
-        gte: since,
-      },
-      status: {
-        in: [OutboundEmailStatus.SENT, OutboundEmailStatus.PENDING],
-      },
-    },
+export async function listOutboundEmails(ticketId: string) {
+  return prisma.outboundEmail.findMany({
+    where: { ticketId },
+    orderBy: { createdAt: "desc" },
   });
-
-  return count;
 }
 
-
-
 /**
- * PH11-06C: Send outbound email from job worker
+ * Retry failed email
  */
-export async function sendOutboundEmailFromJob(outboundEmailId: string): Promise<void> {
-  const prisma = new PrismaClient();
-
-  // Fetch OutboundEmail record
+export async function retryEmail(id: string): Promise<{
+  success: boolean;
+  error?: string;
+}> {
   const outboundEmail = await prisma.outboundEmail.findUnique({
-    where: { id: outboundEmailId },
+    where: { id },
   });
 
   if (!outboundEmail) {
-    throw new Error(`OutboundEmail ${outboundEmailId} not found`);
+    return { success: false, error: "Email not found" };
   }
 
-  // Send using SMTP first, fallback to SES
+  if (outboundEmail.status !== OutboundEmailStatus.FAILED) {
+    return { success: false, error: "Email is not in FAILED status" };
+  }
+
   try {
     await sendViaSMTP({
-      to: outboundEmail.to,
-      from: outboundEmail.from || "amazon@inbound.keybuzz.io",
+      toAddress: outboundEmail.toAddress,
+      from: outboundEmail.from,
       subject: outboundEmail.subject,
       body: outboundEmail.body,
     });
 
-    // Update status
     await prisma.outboundEmail.update({
-      where: { id: outboundEmailId },
+      where: { id },
       data: {
         status: OutboundEmailStatus.SENT,
-        provider: OutboundEmailProvider.SMTP,
         sentAt: new Date(),
+        error: null,
       },
     });
 
-    console.log(`[Outbound] Email ${outboundEmailId} sent via SMTP`);
-  } catch (smtpError: any) {
-    console.error(`[Outbound] SMTP failed for ${outboundEmailId}:`, smtpError.message);
+    return { success: true };
+  } catch (error) {
+    const errorMsg = (error as Error).message;
+    
+    await prisma.outboundEmail.update({
+      where: { id },
+      data: { error: errorMsg },
+    });
 
-    // Fallback to SES
-    try {
-      await sendViaSES({
-        to: outboundEmail.to,
-        from: outboundEmail.from || "amazon@inbound.keybuzz.io",
-        subject: outboundEmail.subject,
-        body: outboundEmail.body,
-      });
-
-      // Update status
-      await prisma.outboundEmail.update({
-        where: { id: outboundEmailId },
-        data: {
-          status: OutboundEmailStatus.SENT,
-          provider: OutboundEmailProvider.SES,
-          sentAt: new Date(),
-        },
-      });
-
-      console.log(`[Outbound] Email ${outboundEmailId} sent via SES fallback`);
-    } catch (sesError: any) {
-      console.error(`[Outbound] SES failed for ${outboundEmailId}:`, sesError.message);
-
-      // Update status as failed
-      await prisma.outboundEmail.update({
-        where: { id: outboundEmailId },
-        data: {
-          status: OutboundEmailStatus.FAILED,
-          error: `SMTP: ${smtpError.message}; SES: ${sesError.message}`,
-        },
-      });
-
-      throw new Error(`Both SMTP and SES failed: ${smtpError.message}; ${sesError.message}`);
-    }
+    return { success: false, error: errorMsg };
   }
 }

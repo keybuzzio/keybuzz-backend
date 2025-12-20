@@ -12,8 +12,7 @@ import { registerAuthRoutes } from "./modules/auth/auth.routes";
 import { registerTicketRoutes } from "./modules/tickets/tickets.routes";
 import { registerTicketMessageRoutes } from "./modules/tickets/messages.routes";
 import { registerAiTestRoutes } from "./modules/ai/ai.routes";
-import { registerMarketplaceRoutes, registerPublicMarketplaceRoutes } from "./modules/marketplaces/marketplaces.routes";
-import { registerAmazonMessagingRoutes } from "./modules/marketplaces/amazon/amazon.messaging.routes";
+import { registerMarketplaceRoutes, registerPublicMarketplaceRoutes, registerAmazonReplyRoutes } from "./modules/marketplaces/marketplaces.routes";
 import { registerInboundRoutes } from "./modules/inbound/inbound.routes";
 import { registerInboundEmailWebhookRoutes } from "./modules/webhooks/inboundEmailWebhook.routes";
 import { registerInboundEmailRoutes } from "./modules/inboundEmail/inboundEmail.routes";
@@ -23,16 +22,19 @@ import { registerOpsRoutes } from './modules/ops/ops.routes';
 async function bootstrap() {
   const app = Fastify({ 
     logger: true,
-    bodyLimit: 1048576,
+    bodyLimit: 1048576, // 1MB
   });
 
+  // Register CORS and Helmet
   await app.register(cors);
   await app.register(helmet);
 
+  // Register JWT plugin
   await app.register(fastifyJwt, {
     secret: process.env.JWT_SECRET || "fallback-secret-change-me"
   });
 
+  // Register Swagger
   await app.register(swagger, {
     openapi: {
       info: {
@@ -46,19 +48,23 @@ async function bootstrap() {
     routePrefix: "/docs",
   });
 
-  // PUBLIC ROUTES
+  // ========================================
+  // PUBLIC ROUTES (no JWT required)
+  // ========================================
   await registerInboundEmailWebhookRoutes(app);
   await registerPublicMarketplaceRoutes(app);
   registerHealthRoutes(app);
 
-  // AUTHENTICATED ROUTES
+  // ========================================
+  // AUTHENTICATED ROUTES (JWT required)
+  // ========================================
   registerTenantRoutes(app);
   registerAuthRoutes(app);
   registerTicketRoutes(app);
   registerTicketMessageRoutes(app);
   registerAiTestRoutes(app);
   await registerMarketplaceRoutes(app);
-  await registerAmazonMessagingRoutes(app);
+  await registerAmazonReplyRoutes(app);
   await registerInboundRoutes(app);
   await registerInboundEmailRoutes(app);
   await registerOutboundRoutes(app);
