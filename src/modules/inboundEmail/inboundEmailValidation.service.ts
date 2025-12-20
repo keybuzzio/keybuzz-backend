@@ -41,7 +41,7 @@ export async function sendValidationEmail(connectionId: string, country?: string
       data: {
         tenantId: connection.tenantId,
         ticketId: connectionId, // Use connectionId as ticketId for validation emails
-        to: address.emailAddress,
+        toAddress: address.emailAddress,
         from: 'validator@inbound.keybuzz.io',
         subject,
         body,

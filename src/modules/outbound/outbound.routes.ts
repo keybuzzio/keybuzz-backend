@@ -1,9 +1,10 @@
 /**
  * Outbound Email Routes
  * PH11-06B.3
+ * FIXED: Use encapsulated plugin to prevent global preHandler hook
  */
 
-import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyRequest, FastifyReply, FastifyPluginOptions } from "fastify";
 import { PrismaClient, OutboundEmailStatus } from "@prisma/client";
 import { sendEmail, getOutboundEmail, listOutboundEmails, retryEmail } from "./outboundEmail.service";
 
@@ -23,15 +24,19 @@ async function authenticate(request: FastifyRequest, reply: FastifyReply) {
   }
 }
 
-export async function registerOutboundRoutes(server: FastifyInstance) {
-  // All routes require auth
+/**
+ * Encapsulated plugin for outbound routes
+ * The addHook call only affects routes WITHIN this plugin
+ */
+async function outboundPlugin(server: FastifyInstance, _opts: FastifyPluginOptions) {
+  // Hook only applies to routes within this encapsulated plugin
   server.addHook("preHandler", authenticate);
 
   /**
-   * POST /api/v1/outbound/send
+   * POST /send
    * Send an outbound email
    */
-  server.post("/api/v1/outbound/send", async (request, reply) => {
+  server.post("/send", async (request, reply) => {
     const user = request.user as JwtUserPayload;
     if (!user?.tenantId) {
       return reply.status(403).send({ error: "Forbidden" });
@@ -75,10 +80,10 @@ export async function registerOutboundRoutes(server: FastifyInstance) {
   });
 
   /**
-   * GET /api/v1/outbound/emails/:id
+   * GET /emails/:id
    * Get outbound email by ID
    */
-  server.get("/api/v1/outbound/emails/:id", async (request, reply) => {
+  server.get("/emails/:id", async (request, reply) => {
     const user = request.user as JwtUserPayload;
     const { id } = request.params as { id: string };
 
@@ -96,10 +101,10 @@ export async function registerOutboundRoutes(server: FastifyInstance) {
   });
 
   /**
-   * GET /api/v1/outbound/tickets/:ticketId/emails
+   * GET /tickets/:ticketId/emails
    * List outbound emails for ticket
    */
-  server.get("/api/v1/outbound/tickets/:ticketId/emails", async (request, reply) => {
+  server.get("/tickets/:ticketId/emails", async (request, reply) => {
     const user = request.user as JwtUserPayload;
     const { ticketId } = request.params as { ticketId: string };
 
@@ -113,10 +118,10 @@ export async function registerOutboundRoutes(server: FastifyInstance) {
   });
 
   /**
-   * POST /api/v1/outbound/emails/:id/retry
+   * POST /emails/:id/retry
    * Retry failed email
    */
-  server.post("/api/v1/outbound/emails/:id/retry", async (request, reply) => {
+  server.post("/emails/:id/retry", async (request, reply) => {
     const user = request.user as JwtUserPayload;
     const { id } = request.params as { id: string };
 
@@ -140,10 +145,10 @@ export async function registerOutboundRoutes(server: FastifyInstance) {
   });
 
   /**
-   * GET /api/v1/outbound/recent
+   * GET /recent
    * Get recent outbound emails for tenant
    */
-  server.get("/api/v1/outbound/recent", async (request, reply) => {
+  server.get("/recent", async (request, reply) => {
     const user = request.user as JwtUserPayload;
 
     if (!user?.tenantId) {
@@ -158,4 +163,11 @@ export async function registerOutboundRoutes(server: FastifyInstance) {
 
     return reply.send({ emails });
   });
+}
+
+/**
+ * Register outbound routes with /api/v1/outbound prefix
+ */
+export async function registerOutboundRoutes(server: FastifyInstance) {
+  await server.register(outboundPlugin, { prefix: "/api/v1/outbound" });
 }
