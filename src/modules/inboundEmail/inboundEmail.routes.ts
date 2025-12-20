@@ -25,6 +25,30 @@ async function authenticate(request: FastifyRequest, reply: FastifyReply) {
 /**
  * Plugin with all inbound email routes (encapsulated)
  */
+
+
+/**
+ * Helper: Build tenant filter for queries
+ * super_admin can see all, others are filtered by tenantId
+ */
+function getTenantFilter(user: any): { tenantId?: string } {
+  if (user?.role === "super_admin") {
+    return {}; // No filter for super_admin
+  }
+  return { tenantId: user?.tenantId };
+}
+
+/**
+ * Helper: Assert tenant access
+ * super_admin can access any, others must match tenantId
+ */
+function assertTenantAccess(user: any, resourceTenantId: string): boolean {
+  if (!user) return false;
+  if (user.role === "super_admin") return true;
+  if (!user.tenantId) return false;
+  return user.tenantId === resourceTenantId;
+}
+
 async function inboundEmailPlugin(server: FastifyInstance, _opts: FastifyPluginOptions) {
   // Apply JWT authentication ONLY to this encapsulated scope
   server.addHook("preHandler", authenticate);
@@ -36,12 +60,17 @@ async function inboundEmailPlugin(server: FastifyInstance, _opts: FastifyPluginO
   server.get("/connections", async (request, reply) => {
     try {
       const user = request.user;
-      if (!user || !user.tenantId) {
+      if (!user) {
+        return reply.status(401).send({ error: "Unauthorized" });
+      }
+
+      // super_admin can list all, others need tenantId
+      if (user.role !== "super_admin" && !user.tenantId) {
         return reply.status(403).send({ error: "Forbidden: no tenantId" });
       }
 
       const connections = await prisma.inboundConnection.findMany({
-        where: { tenantId: user.tenantId },
+        where: getTenantFilter(user),
         include: {
           addresses: true,
           tenant: { select: { name: true } },
@@ -71,12 +100,12 @@ async function inboundEmailPlugin(server: FastifyInstance, _opts: FastifyPluginO
     try {
       const { id } = request.params as { id: string };
       const user = request.user;
-      if (!user || !user.tenantId) {
-        return reply.status(403).send({ error: "Forbidden: no tenantId" });
+      if (!user) {
+        return reply.status(401).send({ error: "Unauthorized" });
       }
 
       const connection = await prisma.inboundConnection.findUnique({
-        where: { id, tenantId: user.tenantId },
+        where: { id },
         include: {
           addresses: true,
           tenant: { select: { name: true } },
@@ -85,6 +114,11 @@ async function inboundEmailPlugin(server: FastifyInstance, _opts: FastifyPluginO
 
       if (!connection) {
         return reply.status(404).send({ error: "Connection not found" });
+      }
+
+      // Check tenant access
+      if (!assertTenantAccess(user, connection.tenantId)) {
+        return reply.status(403).send({ error: "Forbidden: tenant mismatch" });
       }
 
       const connectionWithSummary = {
@@ -221,7 +255,7 @@ async function inboundEmailPlugin(server: FastifyInstance, _opts: FastifyPluginO
       }
 
       const connection = await prisma.inboundConnection.findUnique({
-        where: { id, tenantId: user.tenantId },
+        where: { id },
       });
 
       if (!connection) {
@@ -303,6 +337,12 @@ async function inboundEmailPlugin(server: FastifyInstance, _opts: FastifyPluginO
 
       if (!connection) {
         return reply.status(404).send({ error: "Connection not found" });
+      }
+
+      // Check tenant access (super_admin can access all)
+      const user = request.user;
+      if (!assertTenantAccess(user, connection.tenantId)) {
+        return reply.status(403).send({ error: "Forbidden: tenant mismatch" });
       }
 
       // Calculate inbound health
