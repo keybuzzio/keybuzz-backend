@@ -22,8 +22,8 @@ export async function generateAmazonOAuthUrl(tenantId: string): Promise<{
   // Get app credentials from Vault
   const appCreds = await getAmazonAppCredentials();
 
-  if (!appCreds.client_id) {
-    throw new Error("Amazon SP-API client_id not configured");
+  if (!appCreds.application_id) {
+    throw new Error("Amazon SP-API application_id not configured in Vault");
   }
 
   // Generate secure state (anti-CSRF)
@@ -40,42 +40,50 @@ export async function generateAmazonOAuthUrl(tenantId: string): Promise<{
 
   if (connection) {
     // Update or create sync state with OAuth state
-    await prisma.marketplaceSyncState.upsert({
+    const existingState = await prisma.marketplaceSyncState.findFirst({
       where: {
-        // Workaround: find by connectionId manually
-        id:
-          (
-            await prisma.marketplaceSyncState.findFirst({
-              where: {
-                tenantId,
-                connectionId: connection.id,
-                type: MarketplaceType.AMAZON,
-              },
-            })
-          )?.id || "new",
-      },
-      update: {
-        cursor: state, // Store state in cursor temporarily
-        lastPolledAt: expiresAt,
-      },
-      create: {
         tenantId,
         connectionId: connection.id,
         type: MarketplaceType.AMAZON,
-        cursor: state,
-        lastPolledAt: expiresAt,
       },
     });
+
+    if (existingState) {
+      await prisma.marketplaceSyncState.update({
+        where: { id: existingState.id },
+        data: {
+          cursor: state,
+          lastPolledAt: expiresAt,
+        },
+      });
+    } else {
+      await prisma.marketplaceSyncState.create({
+        data: {
+          tenantId,
+          connectionId: connection.id,
+          type: MarketplaceType.AMAZON,
+          cursor: state,
+          lastPolledAt: expiresAt,
+        },
+      });
+    }
   }
 
-  // Build Amazon consent URL
+  // Build Amazon consent URL with application_id (NOT client_id)
   const params = new URLSearchParams({
-    application_id: appCreds.client_id,
+    application_id: appCreds.application_id,
     state,
     version: "beta",
   });
 
+  // Optional: add redirect_uri if configured
+  if (appCreds.redirect_uri) {
+    params.set("redirect_uri", appCreds.redirect_uri);
+  }
+
   const authUrl = `${LWA_AUTHORIZE_URL}?${params.toString()}`;
+
+  console.log(`[Amazon OAuth] Generated auth URL for tenant ${tenantId}, app_id: ${appCreds.application_id.substring(0, 30)}...`);
 
   return {
     authUrl,
@@ -99,6 +107,7 @@ export async function validateOAuthState(
   });
 
   if (!connection) {
+    console.warn(`[Amazon OAuth] No connection found for tenant ${tenantId}`);
     return false;
   }
 
@@ -111,14 +120,13 @@ export async function validateOAuthState(
   });
 
   if (!syncState || syncState.cursor !== state) {
+    console.warn(`[Amazon OAuth] State mismatch for tenant ${tenantId}`);
     return false;
   }
 
   // Check if not expired (15 minutes)
-  if (
-    syncState.lastPolledAt &&
-    syncState.lastPolledAt < new Date()
-  ) {
+  if (syncState.lastPolledAt && syncState.lastPolledAt < new Date()) {
+    console.warn(`[Amazon OAuth] State expired for tenant ${tenantId}`);
     return false;
   }
 
@@ -135,7 +143,7 @@ export async function exchangeCodeForTokens(code: string): Promise<{
   const appCreds = await getAmazonAppCredentials();
 
   if (!appCreds.client_id || !appCreds.client_secret) {
-    throw new Error("Amazon SP-API credentials not configured");
+    throw new Error("Amazon SP-API client credentials not configured in Vault");
   }
 
   const params = new URLSearchParams({
@@ -145,7 +153,6 @@ export async function exchangeCodeForTokens(code: string): Promise<{
     client_secret: appCreds.client_secret,
   });
 
-  // eslint-disable-next-line no-undef
   const response = await fetch(LWA_TOKEN_URL, {
     method: "POST",
     headers: {
@@ -156,13 +163,12 @@ export async function exchangeCodeForTokens(code: string): Promise<{
 
   if (!response.ok) {
     const errorText = await response.text();
-    console.error(
-      `[Amazon OAuth] Token exchange failed: ${response.status} - ${errorText}`
-    );
+    console.error(`[Amazon OAuth] Token exchange failed: ${response.status} - ${errorText}`);
     throw new Error(`Amazon token exchange failed: ${response.status}`);
   }
 
   const data = await response.json();
+  console.log("[Amazon OAuth] Token exchange successful");
 
   return {
     refresh_token: data.refresh_token,
@@ -177,7 +183,7 @@ export async function completeAmazonOAuth(params: {
   tenantId: string;
   code: string;
   state: string;
-  sellingPartnerId: string; // From Amazon callback (spapi_oauth_code)
+  sellingPartnerId: string;
 }): Promise<void> {
   const { tenantId, code, state, sellingPartnerId } = params;
 
@@ -190,7 +196,7 @@ export async function completeAmazonOAuth(params: {
   // 2. Exchange code for tokens
   const tokens = await exchangeCodeForTokens(code);
 
-  // 3. Store in Vault
+  // 3. Store in Vault (tenant-scoped)
   await storeAmazonTenantCredentials(tenantId, {
     refresh_token: tokens.refresh_token,
     seller_id: sellingPartnerId,
@@ -200,7 +206,7 @@ export async function completeAmazonOAuth(params: {
   });
 
   // 4. Update MarketplaceConnection
-  const vaultPath = `secret/keybuzz/tenants/${tenantId}/amazon`;
+  const vaultPath = `secret/keybuzz/tenants/${tenantId}/amazon_spapi`;
 
   await prisma.marketplaceConnection.updateMany({
     where: {
@@ -225,10 +231,9 @@ export async function completeAmazonOAuth(params: {
       type: MarketplaceType.AMAZON,
     },
     data: {
-      cursor: null, // Clear OAuth state
+      cursor: null,
     },
   });
 
-  console.log(`[Amazon OAuth] OAuth flow completed for tenant ${tenantId}`);
+  console.log(`[Amazon OAuth] Flow completed for tenant ${tenantId}, seller: ${sellingPartnerId}`);
 }
-

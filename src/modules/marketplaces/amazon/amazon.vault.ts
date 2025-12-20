@@ -4,41 +4,45 @@ import { env } from "../../../config/env";
 
 export interface AmazonTenantCredentials {
   refresh_token: string;
-  seller_id: string;
-  marketplace_id: string;
-  region: string;
-  created_at: string;
+  seller_id?: string;
+  marketplace_id?: string;
+  region?: string;
+  created_at?: string;
 }
 
 export interface AmazonAppCredentials {
   client_id: string;
   client_secret: string;
+  application_id: string;
+  redirect_uri: string;
+  login_uri: string;
+  region: string;
 }
 
 /**
- * Get Amazon app credentials from Vault (global)
+ * Get Amazon app credentials from Vault (global KeyBuzz)
+ * Path: secret/keybuzz/amazon_spapi/app
  */
 export async function getAmazonAppCredentials(): Promise<AmazonAppCredentials> {
   const vaultAddr = env.VAULT_ADDR || process.env.VAULT_ADDR;
   const vaultToken = env.VAULT_TOKEN || process.env.VAULT_TOKEN;
 
   if (!vaultAddr || !vaultToken) {
-    // Fallback to env vars for dev
+    console.warn("[Amazon Vault] Vault not configured, falling back to env vars");
     return {
-      client_id: env.AMAZON_SPAPI_CLIENT_ID || "",
-      client_secret: env.AMAZON_SPAPI_CLIENT_SECRET || "",
+      client_id: env.AMAZON_SPAPI_CLIENT_ID || process.env.AMAZON_SPAPI_CLIENT_ID || "",
+      client_secret: env.AMAZON_SPAPI_CLIENT_SECRET || process.env.AMAZON_SPAPI_CLIENT_SECRET || "",
+      application_id: process.env.AMAZON_SPAPI_APP_ID || "",
+      redirect_uri: env.AMAZON_SPAPI_REDIRECT_URI || process.env.AMAZON_SPAPI_REDIRECT_URI || "",
+      login_uri: process.env.AMAZON_SPAPI_LOGIN_URI || "",
+      region: process.env.AMAZON_SPAPI_REGION || "eu-west-1",
     };
   }
 
   try {
-    // Determine app source (external_test or keybuzz)
-    const appSource = process.env.AMAZON_SPAPI_APP_SOURCE || "external_test";
-    const vaultPath =
-      appSource === "keybuzz"
-        ? "secret/data/keybuzz/ai/amazon_spapi_app"
-        : "secret/data/keybuzz/ai/amazon_spapi_app_temp";
+    // Path for KeyBuzz app credentials
+    const vaultPath = "secret/data/keybuzz/amazon_spapi/app";
 
-    // eslint-disable-next-line no-undef
     const response = await fetch(`${vaultAddr}/v1/${vaultPath}`, {
       headers: {
         "X-Vault-Token": vaultToken,
@@ -46,33 +50,32 @@ export async function getAmazonAppCredentials(): Promise<AmazonAppCredentials> {
     });
 
     if (!response.ok) {
-      console.error(
-        `[Amazon Vault] Failed to fetch app credentials from Vault: ${response.status}`
-      );
-      // Fallback to env
-      return {
-        client_id: env.AMAZON_SPAPI_CLIENT_ID || "",
-        client_secret: env.AMAZON_SPAPI_CLIENT_SECRET || "",
-      };
+      console.error(`[Amazon Vault] Failed to fetch app credentials: ${response.status}`);
+      throw new Error(`Vault fetch failed: ${response.status}`);
     }
 
     const data = await response.json();
+    const creds = data.data.data;
+
+    console.log("[Amazon Vault] Successfully loaded KeyBuzz app credentials");
+
     return {
-      client_id: data.data.data.client_id,
-      client_secret: data.data.data.client_secret,
+      client_id: creds.client_id,
+      client_secret: creds.client_secret,
+      application_id: creds.application_id,
+      redirect_uri: creds.redirect_uri,
+      login_uri: creds.login_uri,
+      region: creds.region || "eu-west-1",
     };
   } catch (error) {
     console.error("[Amazon Vault] Error fetching app credentials:", error);
-    // Fallback to env
-    return {
-      client_id: env.AMAZON_SPAPI_CLIENT_ID || "",
-      client_secret: env.AMAZON_SPAPI_CLIENT_SECRET || "",
-    };
+    throw error;
   }
 }
 
 /**
  * Get Amazon tenant credentials from Vault
+ * Path: secret/keybuzz/tenants/{tenantId}/amazon_spapi
  */
 export async function getAmazonTenantCredentials(
   tenantId: string
@@ -81,15 +84,12 @@ export async function getAmazonTenantCredentials(
   const vaultToken = env.VAULT_TOKEN || process.env.VAULT_TOKEN;
 
   if (!vaultAddr || !vaultToken) {
-    console.warn(
-      `[Amazon Vault] Vault not configured for tenant ${tenantId}`
-    );
+    console.warn(`[Amazon Vault] Vault not configured for tenant ${tenantId}`);
     return null;
   }
 
   try {
-    const vaultPath = `secret/data/keybuzz/tenants/${tenantId}/amazon`;
-    // eslint-disable-next-line no-undef
+    const vaultPath = `secret/data/keybuzz/tenants/${tenantId}/amazon_spapi`;
     const response = await fetch(`${vaultAddr}/v1/${vaultPath}`, {
       headers: {
         "X-Vault-Token": vaultToken,
@@ -98,34 +98,23 @@ export async function getAmazonTenantCredentials(
 
     if (!response.ok) {
       if (response.status === 404) {
-        // No credentials stored yet
         return null;
       }
-      console.error(
-        `[Amazon Vault] Failed to fetch tenant credentials: ${response.status}`
-      );
+      console.error(`[Amazon Vault] Failed to fetch tenant credentials: ${response.status}`);
       return null;
     }
 
     const data = await response.json();
-    return {
-      refresh_token: data.data.data.refresh_token,
-      seller_id: data.data.data.seller_id,
-      marketplace_id: data.data.data.marketplace_id,
-      region: data.data.data.region,
-      created_at: data.data.data.created_at,
-    };
+    return data.data.data as AmazonTenantCredentials;
   } catch (error) {
-    console.error(
-      `[Amazon Vault] Error fetching tenant credentials:`,
-      error
-    );
+    console.error(`[Amazon Vault] Error fetching tenant credentials:`, error);
     return null;
   }
 }
 
 /**
  * Store Amazon tenant credentials in Vault
+ * Path: secret/keybuzz/tenants/{tenantId}/amazon_spapi
  */
 export async function storeAmazonTenantCredentials(
   tenantId: string,
@@ -135,15 +124,12 @@ export async function storeAmazonTenantCredentials(
   const vaultToken = env.VAULT_TOKEN || process.env.VAULT_TOKEN;
 
   if (!vaultAddr || !vaultToken) {
-    console.warn(
-      `[Amazon Vault] Vault not configured, skipping storage for tenant ${tenantId}`
-    );
+    console.warn(`[Amazon Vault] Vault not configured, skipping storage for tenant ${tenantId}`);
     return;
   }
 
   try {
-    const vaultPath = `secret/data/keybuzz/tenants/${tenantId}/amazon`;
-    // eslint-disable-next-line no-undef
+    const vaultPath = `secret/data/keybuzz/tenants/${tenantId}/amazon_spapi`;
     const response = await fetch(`${vaultAddr}/v1/${vaultPath}`, {
       method: "POST",
       headers: {
@@ -155,21 +141,13 @@ export async function storeAmazonTenantCredentials(
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error(
-        `[Amazon Vault] Failed to store credentials: ${response.status} - ${errorText}`
-      );
+      console.error(`[Amazon Vault] Failed to store credentials: ${response.status} - ${errorText}`);
       throw new Error(`Vault write failed: ${response.status}`);
     }
 
-    console.log(
-      `[Amazon Vault] Credentials stored successfully for tenant ${tenantId}`
-    );
+    console.log(`[Amazon Vault] Credentials stored for tenant ${tenantId}`);
   } catch (error) {
-    console.error(
-      `[Amazon Vault] Error storing tenant credentials:`,
-      error
-    );
+    console.error(`[Amazon Vault] Error storing tenant credentials:`, error);
     throw error;
   }
 }
-
