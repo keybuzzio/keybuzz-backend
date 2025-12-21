@@ -1,4 +1,5 @@
 // src/modules/marketplaces/amazon/amazon.oauth.ts
+// PH11-AMZ-OAUTH-TENANT-FIX-01: Use OAuthState table for tenant/connection tracking
 
 import { randomUUID } from "crypto";
 import { prisma } from "../../../lib/db";
@@ -12,9 +13,14 @@ const LWA_AUTHORIZE_URL = "https://sellercentral.amazon.com/apps/authorize/conse
 const LWA_TOKEN_URL = "https://api.amazon.com/auth/o2/token";
 
 /**
- * Generate Amazon OAuth consent URL
+ * Generate Amazon OAuth consent URL with tenant/connection tracking
+ * @param tenantId - Tenant ID
+ * @param connectionId - MarketplaceConnection ID
  */
-export async function generateAmazonOAuthUrl(tenantId: string): Promise<{
+export async function generateAmazonOAuthUrl(
+  tenantId: string,
+  connectionId: string
+): Promise<{
   authUrl: string;
   state: string;
   expiresAt: Date;
@@ -26,62 +32,44 @@ export async function generateAmazonOAuthUrl(tenantId: string): Promise<{
     throw new Error("Amazon SP-API application_id not configured in Vault");
   }
 
-  // Generate secure state (anti-CSRF)
-  const state = randomUUID();
-  const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
-
-  // Store state in MarketplaceSyncState temporarily (anti-CSRF validation)
+  // Verify connection exists and belongs to tenant
   const connection = await prisma.marketplaceConnection.findFirst({
     where: {
+      id: connectionId,
       tenantId,
       type: MarketplaceType.AMAZON,
     },
   });
 
-  if (connection) {
-    // Update or create sync state with OAuth state
-    const existingState = await prisma.marketplaceSyncState.findFirst({
-      where: {
-        tenantId,
-        connectionId: connection.id,
-        type: MarketplaceType.AMAZON,
-      },
-    });
-
-    if (existingState) {
-      await prisma.marketplaceSyncState.update({
-        where: { id: existingState.id },
-        data: {
-          cursor: state,
-          lastPolledAt: expiresAt,
-        },
-      });
-    } else {
-      await prisma.marketplaceSyncState.create({
-        data: {
-          tenantId,
-          connectionId: connection.id,
-          type: MarketplaceType.AMAZON,
-          cursor: state,
-          lastPolledAt: expiresAt,
-        },
-      });
-    }
+  if (!connection) {
+    throw new Error("Connection not found or does not belong to tenant");
   }
 
-  // Build Amazon consent URL with application_id (NOT client_id)
-  const params = new URLSearchParams({
+  // Generate secure state (anti-CSRF)
+  const state = randomUUID();
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+  // Store state in OAuthState table with tenantId/connectionId binding
+  await prisma.$executeRaw`
+    INSERT INTO "OAuthState" ("id", "marketplaceType", "state", "tenantId", "connectionId", "expiresAt", "used", "createdAt")
+    VALUES (${randomUUID()}, ${MarketplaceType.AMAZON}::"MarketplaceType", ${state}, ${tenantId}, ${connectionId}, ${expiresAt}, false, NOW())
+  `;
+
+  console.log(`[Amazon OAuth] Created OAuth state for tenant ${tenantId}, connectionId: ${connectionId}`);
+
+  // Build Amazon consent URL with application_id
+  const params_url = new URLSearchParams({
     application_id: appCreds.application_id,
     state,
     version: "beta",
   });
 
-  // Optional: add redirect_uri if configured
+  // Add redirect_uri if configured
   if (appCreds.redirect_uri) {
-    params.set("redirect_uri", appCreds.redirect_uri);
+    params_url.set("redirect_uri", appCreds.redirect_uri);
   }
 
-  const authUrl = `${LWA_AUTHORIZE_URL}?${params.toString()}`;
+  const authUrl = `${LWA_AUTHORIZE_URL}?${params_url.toString()}`;
 
   console.log(`[Amazon OAuth] Generated auth URL for tenant ${tenantId}, app_id: ${appCreds.application_id.substring(0, 30)}...`);
 
@@ -93,44 +81,56 @@ export async function generateAmazonOAuthUrl(tenantId: string): Promise<{
 }
 
 /**
- * Validate OAuth state (anti-CSRF)
+ * Validate OAuth state and retrieve tenantId/connectionId
  */
 export async function validateOAuthState(
-  tenantId: string,
   state: string
-): Promise<boolean> {
-  const connection = await prisma.marketplaceConnection.findFirst({
-    where: {
-      tenantId,
-      type: MarketplaceType.AMAZON,
-    },
-  });
+): Promise<{ tenantId: string; connectionId: string | null } | null> {
+  const oauthStateResult = await prisma.$queryRaw<Array<{
+    id: string;
+    tenantId: string;
+    connectionId: string | null;
+    expiresAt: Date;
+    used: boolean;
+  }>>`
+    SELECT "id", "tenantId", "connectionId", "expiresAt", "used"
+    FROM "OAuthState"
+    WHERE "state" = ${state}
+    LIMIT 1
+  `;
 
-  if (!connection) {
-    console.warn(`[Amazon OAuth] No connection found for tenant ${tenantId}`);
-    return false;
+  const oauthState = oauthStateResult[0] || null;
+
+  if (!oauthState) {
+    console.warn(`[Amazon OAuth] State not found: ${state.substring(0, 8)}...`);
+    return null;
   }
 
-  const syncState = await prisma.marketplaceSyncState.findFirst({
-    where: {
-      tenantId,
-      connectionId: connection.id,
-      type: MarketplaceType.AMAZON,
-    },
-  });
-
-  if (!syncState || syncState.cursor !== state) {
-    console.warn(`[Amazon OAuth] State mismatch for tenant ${tenantId}`);
-    return false;
+  if (oauthState.used) {
+    console.warn(`[Amazon OAuth] State already used: ${state.substring(0, 8)}...`);
+    return null;
   }
 
-  // Check if not expired (15 minutes)
-  if (syncState.lastPolledAt && syncState.lastPolledAt < new Date()) {
-    console.warn(`[Amazon OAuth] State expired for tenant ${tenantId}`);
-    return false;
+  if (oauthState.expiresAt < new Date()) {
+    console.warn(`[Amazon OAuth] State expired: ${state.substring(0, 8)}...`);
+    return null;
   }
 
-  return true;
+  return {
+    tenantId: oauthState.tenantId,
+    connectionId: oauthState.connectionId,
+  };
+}
+
+/**
+ * Mark OAuth state as used
+ */
+export async function markOAuthStateAsUsed(state: string): Promise<void> {
+  await prisma.$executeRaw`
+    UPDATE "OAuthState"
+    SET "used" = true, "usedAt" = NOW()
+    WHERE "state" = ${state}
+  `;
 }
 
 /**
@@ -177,20 +177,33 @@ export async function exchangeCodeForTokens(code: string): Promise<{
 }
 
 /**
- * Complete OAuth flow: validate, exchange, store, update DB
+ * Input type for completeAmazonOAuth
  */
-export async function completeAmazonOAuth(params: {
+export type CompleteAmazonOAuthInput = {
   tenantId: string;
+  connectionId: string;
   code: string;
   state: string;
   sellingPartnerId: string;
-}): Promise<void> {
-  const { tenantId, code, state, sellingPartnerId } = params;
+};
 
-  // 1. Validate state (anti-CSRF)
-  const isValid = await validateOAuthState(tenantId, state);
-  if (!isValid) {
-    throw new Error("Invalid or expired OAuth state");
+/**
+ * Complete OAuth flow: validate, exchange, store, update specific connection
+ */
+export async function completeAmazonOAuth(input: CompleteAmazonOAuthInput): Promise<void> {
+  const { tenantId, connectionId, code, state, sellingPartnerId } = input;
+
+  // 1. Verify connection exists and belongs to tenant (security check)
+  const connection = await prisma.marketplaceConnection.findFirst({
+    where: {
+      id: connectionId,
+      tenantId,
+      type: MarketplaceType.AMAZON,
+    },
+  });
+
+  if (!connection) {
+    throw new Error("Connection not found or does not belong to tenant");
   }
 
   // 2. Exchange code for tokens
@@ -205,14 +218,11 @@ export async function completeAmazonOAuth(params: {
     created_at: new Date().toISOString(),
   });
 
-  // 4. Update MarketplaceConnection
+  // 4. Update ONLY the specific MarketplaceConnection (not updateMany)
   const vaultPath = `secret/keybuzz/tenants/${tenantId}/amazon_spapi`;
 
-  await prisma.marketplaceConnection.updateMany({
-    where: {
-      tenantId,
-      type: MarketplaceType.AMAZON,
-    },
+  await prisma.marketplaceConnection.update({
+    where: { id: connectionId },
     data: {
       status: "CONNECTED",
       vaultPath,
@@ -224,16 +234,8 @@ export async function completeAmazonOAuth(params: {
     },
   });
 
-  // 5. Clean up state
-  await prisma.marketplaceSyncState.updateMany({
-    where: {
-      tenantId,
-      type: MarketplaceType.AMAZON,
-    },
-    data: {
-      cursor: null,
-    },
-  });
+  // 5. Mark state as used
+  await markOAuthStateAsUsed(state);
 
-  console.log(`[Amazon OAuth] Flow completed for tenant ${tenantId}, seller: ${sellingPartnerId}`);
+  console.log(`[Amazon OAuth] Flow completed for tenant ${tenantId}, connection ${connectionId}, seller: ${sellingPartnerId}`);
 }
