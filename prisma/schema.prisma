@@ -677,3 +677,19 @@ model MarketplaceOutboundMessage {
   @@index([tenantId, status])
   @@index([ticketId])
 }
+
+model OAuthState {
+  id            String   @id @default(cuid())
+  marketplaceType MarketplaceType @default(AMAZON)
+  state         String   // OAuth state token (anti-CSRF)
+  tenantId      String
+  connectionId String   // MarketplaceConnection id (required)
+  expiresAt     DateTime
+  usedAt        DateTime?
+  createdAt     DateTime @default(now())
+
+  @@unique([marketplaceType, state])
+  @@index([expiresAt])
+  @@index([tenantId])
+  @@index([connectionId])
+}
