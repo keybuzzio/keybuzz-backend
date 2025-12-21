@@ -118,8 +118,7 @@ async function inboundEmailPlugin(server: FastifyInstance, _opts: FastifyPluginO
 
       // Check tenant access
       if (!assertTenantAccess(user, connection.tenantId)) {
-        return reply.status(403).send({ error: "Forbidden: tenant mismatch" });
-      }
+        return reply.status(403).send({ error: "Forbidden: tenant mismatch" }
       // Find Amazon MarketplaceConnection for this tenant
       const amazonMarketplaceConnection = await prisma.marketplaceConnection.findFirst({
         where: {
@@ -128,6 +127,8 @@ async function inboundEmailPlugin(server: FastifyInstance, _opts: FastifyPluginO
         },
         orderBy: { updatedAt: "desc" },
       });
+);
+      }
 
       const connectionWithSummary = {
   ...connection,

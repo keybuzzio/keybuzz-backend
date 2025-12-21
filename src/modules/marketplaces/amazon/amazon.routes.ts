@@ -90,29 +90,10 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
           targetTenantId = user.tenantId; // Ignore body.tenantId for non-super_admin
         }
 
-        // For non-super_admin: if connectionId not provided, find first Amazon connection for tenant
-        // For super_admin: connectionId is required
+        // Resolve MarketplaceConnection: connectionId is optional if tenantId is provided
+        // Priority: CONNECTED > PENDING > most recent
         let connection;
-        if (!body.connectionId) {
-          if (user.role === "super_admin") {
-            return reply.status(400).send({
-              error: "connectionId is required",
-            });
-          }
-          // Find first Amazon connection for tenant
-          connection = await prisma.marketplaceConnection.findFirst({
-            where: {
-              tenantId: targetTenantId,
-              type: MarketplaceType.AMAZON,
-            },
-            orderBy: { updatedAt: "desc" },
-          });
-          if (!connection) {
-            return reply.status(404).send({
-              error: "No Amazon connection found for tenant",
-            });
-          }
-        } else {
+        if (body.connectionId) {
           // Verify connection exists and belongs to tenant
           connection = await prisma.marketplaceConnection.findFirst({
             where: {
@@ -121,6 +102,48 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
               type: MarketplaceType.AMAZON,
             },
           });
+          if (!connection) {
+            return reply.status(404).send({
+              error: "MarketplaceConnection not found or does not belong to tenant",
+            });
+          }
+        } else {
+          // Find Amazon MarketplaceConnection for tenant (priority: CONNECTED > PENDING > most recent)
+          // Try CONNECTED first
+          connection = await prisma.marketplaceConnection.findFirst({
+            where: {
+              tenantId: targetTenantId,
+              type: MarketplaceType.AMAZON,
+              status: "CONNECTED",
+            },
+            orderBy: { updatedAt: "desc" },
+          });
+          // If not found, try PENDING
+          if (!connection) {
+            connection = await prisma.marketplaceConnection.findFirst({
+              where: {
+                tenantId: targetTenantId,
+                type: MarketplaceType.AMAZON,
+                status: "PENDING",
+              },
+              orderBy: { updatedAt: "desc" },
+            });
+          }
+          // If still not found, try any status
+          if (!connection) {
+            connection = await prisma.marketplaceConnection.findFirst({
+              where: {
+                tenantId: targetTenantId,
+                type: MarketplaceType.AMAZON,
+              },
+              orderBy: { updatedAt: "desc" },
+            });
+          }
+          if (!connection) {
+            return reply.status(404).send({
+              error: "no_amazon_marketplace_connection_for_tenant",
+            });
+          }
         }
 
         if (!connection) {
