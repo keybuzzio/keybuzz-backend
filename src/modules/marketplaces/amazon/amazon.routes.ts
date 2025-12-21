@@ -90,21 +90,38 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
           targetTenantId = user.tenantId; // Ignore body.tenantId for non-super_admin
         }
 
-        // connectionId is required
+        // For non-super_admin: if connectionId not provided, find first Amazon connection for tenant
+        // For super_admin: connectionId is required
+        let connection;
         if (!body.connectionId) {
-          return reply.status(400).send({
-            error: "connectionId is required",
+          if (user.role === "super_admin") {
+            return reply.status(400).send({
+              error: "connectionId is required",
+            });
+          }
+          // Find first Amazon connection for tenant
+          connection = await prisma.marketplaceConnection.findFirst({
+            where: {
+              tenantId: targetTenantId,
+              type: MarketplaceType.AMAZON,
+            },
+            orderBy: { updatedAt: "desc" },
+          });
+          if (!connection) {
+            return reply.status(404).send({
+              error: "No Amazon connection found for tenant",
+            });
+          }
+        } else {
+          // Verify connection exists and belongs to tenant
+          connection = await prisma.marketplaceConnection.findFirst({
+            where: {
+              id: body.connectionId,
+              tenantId: targetTenantId,
+              type: MarketplaceType.AMAZON,
+            },
           });
         }
-
-        // Verify connection exists and belongs to tenant
-        const connection = await prisma.marketplaceConnection.findFirst({
-          where: {
-            id: body.connectionId,
-            tenantId: targetTenantId,
-            type: MarketplaceType.AMAZON,
-          },
-        });
 
         if (!connection) {
           return reply.status(404).send({
@@ -113,7 +130,7 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
         }
 
         // Generate OAuth URL with connectionId
-        const oauthData = await generateAmazonOAuthUrl(targetTenantId, body.connectionId);
+        const oauthData = await generateAmazonOAuthUrl(targetTenantId, connection.id);
 
         return reply.send({
           success: true,
