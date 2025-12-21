@@ -5,28 +5,17 @@ import { prisma } from "../../../lib/db";
 import { env } from "../../../config/env";
 import { ensureAmazonConnection } from "./amazon.service";
 import { pollAmazonForTenant } from "./amazon.poller";
-import { MarketplaceType, Prisma } from "@prisma/client";
+import { MarketplaceType } from "@prisma/client";
 import type { AuthUser } from "../../auth/auth.types";
 import { generateAmazonOAuthUrl, completeAmazonOAuth } from "./amazon.oauth";
 
 export async function registerAmazonRoutes(server: FastifyInstance) {
-  /**
-   * JWT Authentication preHandler (local to this plugin)
-   */
-  const authenticate = async (request: FastifyRequest) => {
-    await request.jwtVerify();
-  };
-  
-  // Add preHandler hook for all routes in this plugin (except callback which is public)
-  // Note: callback route is registered separately without this hook
-  
   /**
    * GET /api/v1/marketplaces/amazon/status
    * Get Amazon connection status for current tenant
    */
   server.get(
     "/api/v1/marketplaces/amazon/status",
-    { preHandler: authenticate },
     async (request: FastifyRequest, reply) => {
       const user = (request as FastifyRequest & { user: AuthUser }).user;
       
@@ -66,8 +55,8 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
    */
   server.post(
     "/api/v1/marketplaces/amazon/oauth/start",
-    { preHandler: authenticate },
     async (request: FastifyRequest, reply) => {
+      await request.jwtVerify();
       const user = (request as FastifyRequest & { user: AuthUser }).user;
       
       if (!user || !user.tenantId) {
@@ -75,7 +64,7 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
       }
 
       try {
-        const body = request.body as { tenantId?: string; connectionId?: string };
+        const body = request.body as { tenantId?: string; connectionId?: string; returnTo?: string };
         
         // Determine tenantId: super_admin can specify, others use their own
         let targetTenantId: string;
@@ -90,61 +79,21 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
           targetTenantId = user.tenantId; // Ignore body.tenantId for non-super_admin
         }
 
-        // Resolve MarketplaceConnection: connectionId is optional if tenantId is provided
-        // Priority: CONNECTED > PENDING > most recent
-        let connection;
-        if (body.connectionId) {
-          // Verify connection exists and belongs to tenant
-          connection = await prisma.marketplaceConnection.findFirst({
-            where: {
-              id: body.connectionId,
-              tenantId: targetTenantId,
-              type: MarketplaceType.AMAZON,
-            },
+        // connectionId is required
+        if (!body.connectionId) {
+          return reply.status(400).send({
+            error: "connectionId is required",
           });
-          if (!connection) {
-            return reply.status(404).send({
-              error: "MarketplaceConnection not found or does not belong to tenant",
-            });
-          }
-        } else {
-          // Find Amazon MarketplaceConnection for tenant (priority: CONNECTED > PENDING > most recent)
-          // Try CONNECTED first
-          connection = await prisma.marketplaceConnection.findFirst({
-            where: {
-              tenantId: targetTenantId,
-              type: MarketplaceType.AMAZON,
-              status: "CONNECTED",
-            },
-            orderBy: { updatedAt: "desc" },
-          });
-          // If not found, try PENDING
-          if (!connection) {
-            connection = await prisma.marketplaceConnection.findFirst({
-              where: {
-                tenantId: targetTenantId,
-                type: MarketplaceType.AMAZON,
-                status: "PENDING",
-              },
-              orderBy: { updatedAt: "desc" },
-            });
-          }
-          // If still not found, try any status
-          if (!connection) {
-            connection = await prisma.marketplaceConnection.findFirst({
-              where: {
-                tenantId: targetTenantId,
-                type: MarketplaceType.AMAZON,
-              },
-              orderBy: { updatedAt: "desc" },
-            });
-          }
-          if (!connection) {
-            return reply.status(404).send({
-              error: "no_amazon_marketplace_connection_for_tenant",
-            });
-          }
         }
+
+        // Verify connection exists and belongs to tenant
+        const connection = await prisma.marketplaceConnection.findFirst({
+          where: {
+            id: body.connectionId,
+            tenantId: targetTenantId,
+            type: MarketplaceType.AMAZON,
+          },
+        });
 
         if (!connection) {
           return reply.status(404).send({
@@ -152,8 +101,8 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
           });
         }
 
-        // Generate OAuth URL with connectionId
-        const oauthData = await generateAmazonOAuthUrl(targetTenantId, connection.id);
+        // Generate OAuth URL with connectionId and returnTo (if provided)
+        const oauthData = await generateAmazonOAuthUrl(targetTenantId, body.connectionId, body.returnTo);
 
         return reply.send({
           success: true,
@@ -229,14 +178,15 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
         error_description?: string;
       };
 
+      const redirectBase = process.env.ADMIN_UI_BASE_URL || "https://admin-dev.keybuzz.io";
+
       // Check for errors from Amazon
       if (query.error) {
         console.error(
-          `[Amazon OAuth] Authorization failed: ${query.error} - ${query.error_description}`);
-        return reply.status(400).send({
-          error: "Amazon authorization failed",
-          details: query.error_description || query.error,
-        });
+          `[Amazon OAuth] Authorization failed: ${query.error} - ${query.error_description}`
+        );
+        const redirectUrl: string = `${redirectBase}/inbound-email/amazon/callback?success=0&error=amazon_authorization_failed`;
+        return reply.code(302).redirect(redirectUrl);
       }
 
       // Amazon sends both 'code' (LWA) and 'spapi_oauth_code' (SP-API)
@@ -245,41 +195,40 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
       const sellingPartnerId = query.selling_partner_id;
 
       if (!authCode || !state || !sellingPartnerId) {
-        return reply.status(400).send({
-          error: "Missing required OAuth parameters",
-          details: "code, state, or selling_partner_id missing",
-        });
+        const redirectUrl: string = `${redirectBase}/inbound-email/amazon/callback?success=0&error=missing_parameters`;
+        return reply.code(302).redirect(redirectUrl);
       }
 
       try {
         // Resolve state → (tenantId, connectionId) from OAuthState
-        const oauthStateResult = await prisma.$queryRaw<Array<{id: string; tenantId: string; connectionId: string; expiresAt: Date; usedAt: Date | null}>>`SELECT id, "tenantId", "connectionId", "expiresAt", "usedAt"
+        const oauthStateResult = await prisma.$queryRaw<Array<{id: string; tenantId: string; connectionId: string | null; returnTo: string | null; expiresAt: Date; usedAt: Date | null}>>`
+          SELECT id, "tenantId", "connectionId", "returnTo", "expiresAt", "usedAt"
           FROM "OAuthState"
           WHERE "marketplaceType" = ${MarketplaceType.AMAZON}::"MarketplaceType"
           AND state = ${state}
           LIMIT 1`;
         const oauthState = oauthStateResult[0] || null;
 
-        // Hard fails
+        // Hard fails - redirect to UI with error
         if (!oauthState) {
-          return reply.status(400).send({
-            error: "invalid_state",
-            details: "OAuth state not found",
-          });
+          const redirectUrl: string = `${redirectBase}/inbound-email/amazon/callback?success=0&error=invalid_state`;
+          return reply.code(302).redirect(redirectUrl);
         }
 
         if (oauthState.expiresAt < new Date()) {
-          return reply.status(400).send({
-            error: "expired_state",
-            details: "OAuth state has expired",
-          });
+          const redirectUrl: string = `${redirectBase}/inbound-email/amazon/callback?success=0&error=expired_state`;
+          return reply.code(302).redirect(redirectUrl);
         }
 
         if (oauthState.usedAt) {
-          return reply.status(400).send({
-            error: "state_already_used",
-            details: "OAuth state has already been used",
-          });
+          const redirectUrl: string = `${redirectBase}/inbound-email/amazon/callback?success=0&error=state_already_used`;
+          return reply.code(302).redirect(redirectUrl);
+        }
+
+        // Validate connectionId is present
+        if (!oauthState.connectionId) {
+          const redirectUrl: string = `${redirectBase}/inbound-email/amazon/callback?success=0&error=missing_connection_id`;
+          return reply.code(302).redirect(redirectUrl);
         }
 
         // Complete OAuth flow with tenantId + connectionId from OAuthState
@@ -288,29 +237,26 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
           connectionId: oauthState.connectionId,
           code: authCode,
           state,
-          sellingPartnerId,
+          sellingPartnerId: sellingPartnerId || "",
         });
 
         // Mark state as used
-        await prisma.$executeRaw`UPDATE "OAuthState"
-          SET "usedAt" = NOW()
-          WHERE id = ${oauthState.id}`;
+        await prisma.$executeRaw`
+          UPDATE "OAuthState"
+          SET "usedAt" = NOW(), used = TRUE
+          WHERE id = ${oauthState.id}
+        `;
 
-        // Success: return JSON response
-        return reply.send({
-          success: true,
-          message: "Amazon OAuth completed successfully",
-          tenantId: oauthState.tenantId,
-          connectionId: oauthState.connectionId,
-          sellingPartnerId,
-        });
+        // Success: redirect to admin UI callback page
+        const returnTo = oauthState.returnTo || "/inbound-email";
+        const redirectUrl: string = `${redirectBase}/inbound-email/amazon/callback?success=1&tenantId=${encodeURIComponent(oauthState.tenantId)}&marketplaceConnectionId=${encodeURIComponent(oauthState.connectionId)}&sellingPartnerId=${encodeURIComponent(sellingPartnerId || "")}&returnTo=${encodeURIComponent(returnTo)}`;
+        return reply.code(302).redirect(redirectUrl);
       } catch (error) {
         console.error("[Amazon OAuth] Callback error:", error);
-        return reply.status(500).send({
-          error: "Failed to complete Amazon OAuth",
-          details: (error as Error).message,
-        });
+        const redirectUrl: string = `${redirectBase}/inbound-email/amazon/callback?success=0&error=oauth_failed`;
+        return reply.code(302).redirect(redirectUrl);
       }
     }
   );
 }
+
