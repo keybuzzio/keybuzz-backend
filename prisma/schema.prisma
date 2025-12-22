@@ -489,6 +489,7 @@ model MarketplaceConnection {
 model MarketplaceSyncState {
   id            String          @id @default(cuid())
   connectionId  String
+  tenantId            String
   returnTo        String?   // Optional return URL
   type          MarketplaceType
   cursor        String? // token/cursor Amazon si dispo
@@ -496,7 +497,6 @@ model MarketplaceSyncState {
   lastSuccessAt DateTime?
   lastError     String?
   createdAt     DateTime        @default(now())
-  updatedAt     DateTime @updatedAt
   updatedAt     DateTime        @updatedAt
 
   @@index([tenantId, type])
@@ -507,6 +507,7 @@ model ExternalMessage {
   id           String          @id @default(cuid())
   tenantId     String
   connectionId String
+  tenantId            String
   returnTo        String?   // Optional return URL
   externalId   String // unique id message Amazon
   threadId     String? // id conversation Amazon
@@ -518,7 +519,6 @@ model ExternalMessage {
   raw          Json
   ticketId     String? // mapping KeyBuzz
   createdAt    DateTime        @default(now())
-  updatedAt     DateTime @updatedAt
 
   @@unique([type, connectionId, externalId])
   @@index([tenantId, receivedAt])
@@ -630,6 +630,7 @@ model InboundConnection {
 model InboundAddress {
   id                   String                  @id @default(cuid())
   connectionId         String
+  tenantId            String
   returnTo        String?   // Optional return URL
   marketplace          String
   country              String
@@ -638,11 +639,16 @@ model InboundAddress {
   validationStatus     InboundValidationStatus @default(PENDING) // @deprecated - use pipelineStatus and marketplaceStatus
   pipelineStatus       InboundValidationStatus @default(PENDING)
   marketplaceStatus    InboundValidationStatus @default(PENDING)
+  marketplaceConfiguredAt DateTime?
+  marketplaceConfiguredBy String?
+  marketplaceConfigNote String? @db.VarChar(255)
+  marketplaceConfiguredAt DateTime?
+  marketplaceConfiguredBy String?
+  marketplaceConfigNote String? @db.VarChar(255)
   lastInboundAt        DateTime?
   lastInboundMessageId String?
   lastError            String?
   createdAt            DateTime                @default(now())
-  updatedAt     DateTime @updatedAt
   updatedAt            DateTime                @updatedAt
 
   connection InboundConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
@@ -678,6 +684,7 @@ model MarketplaceOutboundMessage {
   id                String                @id @default(cuid())
   tenantId          String
   connectionId      String? // MarketplaceConnection
+  tenantId            String
   returnTo        String?   // Optional return URL
   ticketId          String?
   channel           TicketChannel         @default(AMAZON)
@@ -693,7 +700,6 @@ model MarketplaceOutboundMessage {
   error             String?               @db.Text
   attempts          Int                   @default(0)
   createdAt         DateTime              @default(now())
-  updatedAt     DateTime @updatedAt
   sentAt            DateTime?
   updatedAt         DateTime              @updatedAt
 
@@ -708,10 +714,10 @@ model OAuthState {
   state         String   // OAuth state token (anti-CSRF)
   tenantId      String
   connectionId String   // MarketplaceConnection id (required)
+  tenantId            String
   returnTo        String?   // Optional return URL
   usedAt        DateTime?
   createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
 
   @@unique([marketplaceType, state])
   @@index([expiresAt])
