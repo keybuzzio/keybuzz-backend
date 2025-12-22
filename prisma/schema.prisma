@@ -43,6 +43,7 @@ model Tenant {
   plan      BillingPlan  @default(DEV)
   status    TenantStatus @default(ACTIVE)
   createdAt DateTime     @default(now())
+  updatedAt     DateTime @updatedAt
   updatedAt DateTime     @updatedAt
 
   users               User[]
@@ -67,6 +68,7 @@ model User {
   role         UserRole @default(AGENT)
   passwordHash String
   createdAt    DateTime @default(now())
+  updatedAt     DateTime @updatedAt
   updatedAt    DateTime @updatedAt
 
   teamMemberships   TeamMembership[]
@@ -79,6 +81,7 @@ model Team {
   tenantId  String
   name      String
   createdAt DateTime @default(now())
+  updatedAt     DateTime @updatedAt
   updatedAt DateTime @updatedAt
 
   members           TeamMembership[]
@@ -93,6 +96,7 @@ model TeamMembership {
   userId    String
   role      TeamRole @default(MEMBER)
   createdAt DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 }
 
 model ApiKey {
@@ -104,6 +108,7 @@ model ApiKey {
   prefix     String
   active     Boolean   @default(true)
   createdAt  DateTime  @default(now())
+  updatedAt     DateTime @updatedAt
   lastUsedAt DateTime?
 }
 
@@ -116,6 +121,7 @@ model Webhook {
   eventTypes     String[]
   isActive       Boolean   @default(true)
   createdAt      DateTime  @default(now())
+  updatedAt     DateTime @updatedAt
   lastDeliveryAt DateTime?
 }
 
@@ -134,6 +140,7 @@ model Ticket {
   priority        TicketPriority @default(NORMAL)
   subject         String
   createdAt       DateTime       @default(now())
+  updatedAt     DateTime @updatedAt
   updatedAt       DateTime       @updatedAt
   firstResponseAt DateTime?
   resolvedAt      DateTime?
@@ -170,6 +177,7 @@ model TicketEvent {
   tenantId  String
   type      TicketEventType
   createdAt DateTime        @default(now())
+  updatedAt     DateTime @updatedAt
   actorType EventActorType
   actorId   String?
   payload   Json?
@@ -185,6 +193,7 @@ model TicketAssignment {
   team      Team?    @relation(fields: [teamId], references: [id])
   teamId    String?
   createdAt DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 }
 
 enum TicketStatus {
@@ -267,6 +276,7 @@ model AiRule {
   trigger       AiTriggerType
   executionMode AiExecutionMode @default(SUGGEST_ONLY)
   createdAt     DateTime        @default(now())
+  updatedAt     DateTime @updatedAt
   updatedAt     DateTime        @updatedAt
 
   conditions AiRuleCondition[]
@@ -309,6 +319,7 @@ model AiResponseDraft {
   ticketId      String
   tenantId      String
   createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
   createdByRule String?
   body          String
   confidence    Float?
@@ -370,6 +381,7 @@ model TenantBillingPlan {
   ticketUnitPrice     Float       @default(0.0)
   aiActionUnitPrice   Float       @default(0.0)
   createdAt           DateTime    @default(now())
+  updatedAt     DateTime @updatedAt
   updatedAt           DateTime    @updatedAt
 }
 
@@ -399,6 +411,7 @@ model TicketBillingUsage {
   calculatedAmount   Float    @default(0.0)
   finalized          Boolean  @default(false)
   createdAt          DateTime @default(now())
+  updatedAt     DateTime @updatedAt
   updatedAt          DateTime @updatedAt
 }
 
@@ -418,6 +431,7 @@ model AiUsageLog {
   estimatedCost Int // en centimes
   latencyMs     Int
   createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
   @@index([tenantId, createdAt])
 }
@@ -433,6 +447,7 @@ model TenantAiBudget {
   maxAutoRechargesPerMonth Int
   maxAutoRechargesPerDay   Int
   createdAt                DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 }
 
 // ---------------------------
@@ -465,6 +480,7 @@ model MarketplaceConnection {
   lastSyncAt    DateTime?
   lastError     String?
   createdAt     DateTime                    @default(now())
+  updatedAt     DateTime @updatedAt
   updatedAt     DateTime                    @updatedAt
 
   @@index([tenantId, type])
@@ -473,13 +489,14 @@ model MarketplaceConnection {
 model MarketplaceSyncState {
   id            String          @id @default(cuid())
   connectionId  String
-  tenantId      String
+  returnTo        String?   // Optional return URL
   type          MarketplaceType
   cursor        String? // token/cursor Amazon si dispo
   lastPolledAt  DateTime?
   lastSuccessAt DateTime?
   lastError     String?
   createdAt     DateTime        @default(now())
+  updatedAt     DateTime @updatedAt
   updatedAt     DateTime        @updatedAt
 
   @@index([tenantId, type])
@@ -490,7 +507,7 @@ model ExternalMessage {
   id           String          @id @default(cuid())
   tenantId     String
   connectionId String
-  type         MarketplaceType
+  returnTo        String?   // Optional return URL
   externalId   String // unique id message Amazon
   threadId     String? // id conversation Amazon
   orderId      String? // order id Amazon si présent
@@ -501,6 +518,7 @@ model ExternalMessage {
   raw          Json
   ticketId     String? // mapping KeyBuzz
   createdAt    DateTime        @default(now())
+  updatedAt     DateTime @updatedAt
 
   @@unique([type, connectionId, externalId])
   @@index([tenantId, receivedAt])
@@ -536,6 +554,7 @@ model OutboundEmail {
   error     String?                @db.Text
   sentAt    DateTime?
   createdAt DateTime               @default(now())
+  updatedAt     DateTime @updatedAt
   updatedAt DateTime               @updatedAt
 
   @@index([tenantId, ticketId])
@@ -575,6 +594,7 @@ model Job {
   lockedBy    String?
   lastError   String?   @db.Text
   createdAt   DateTime  @default(now())
+  updatedAt     DateTime @updatedAt
   updatedAt   DateTime  @updatedAt
 
   @@index([status, nextRunAt])
@@ -596,6 +616,7 @@ model InboundConnection {
   countries   Json
   status      InboundConnectionStatus @default(DRAFT)
   createdAt   DateTime                @default(now())
+  updatedAt     DateTime @updatedAt
   updatedAt   DateTime                @updatedAt
 
   tenant    Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -609,7 +630,7 @@ model InboundConnection {
 model InboundAddress {
   id                   String                  @id @default(cuid())
   connectionId         String
-  tenantId             String
+  returnTo        String?   // Optional return URL
   marketplace          String
   country              String
   token                String
@@ -621,6 +642,7 @@ model InboundAddress {
   lastInboundMessageId String?
   lastError            String?
   createdAt            DateTime                @default(now())
+  updatedAt     DateTime @updatedAt
   updatedAt            DateTime                @updatedAt
 
   connection InboundConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
@@ -656,6 +678,7 @@ model MarketplaceOutboundMessage {
   id                String                @id @default(cuid())
   tenantId          String
   connectionId      String? // MarketplaceConnection
+  returnTo        String?   // Optional return URL
   ticketId          String?
   channel           TicketChannel         @default(AMAZON)
   marketplaceType   MarketplaceType       @default(AMAZON)
@@ -670,6 +693,7 @@ model MarketplaceOutboundMessage {
   error             String?               @db.Text
   attempts          Int                   @default(0)
   createdAt         DateTime              @default(now())
+  updatedAt     DateTime @updatedAt
   sentAt            DateTime?
   updatedAt         DateTime              @updatedAt
 
@@ -684,9 +708,10 @@ model OAuthState {
   state         String   // OAuth state token (anti-CSRF)
   tenantId      String
   connectionId String   // MarketplaceConnection id (required)
-  expiresAt     DateTime
+  returnTo        String?   // Optional return URL
   usedAt        DateTime?
   createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
   @@unique([marketplaceType, state])
   @@index([expiresAt])
