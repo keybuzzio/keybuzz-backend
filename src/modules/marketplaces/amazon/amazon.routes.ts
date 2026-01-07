@@ -8,17 +8,13 @@ import { pollAmazonForTenant } from "./amazon.poller";
 import { MarketplaceType, Prisma } from "@prisma/client";
 import type { AuthUser } from "../../auth/auth.types";
 import { generateAmazonOAuthUrl, completeAmazonOAuth } from "./amazon.oauth";
+import { devAuthenticateOrJwt } from "../../../lib/devAuthMiddleware";
 
 export async function registerAmazonRoutes(server: FastifyInstance) {
   /**
-   * JWT Authentication preHandler (local to this plugin)
+   * Authentication preHandler - uses DEV bridge (X-User-Email) or JWT
    */
-  const authenticate = async (request: FastifyRequest) => {
-    await request.jwtVerify();
-  };
-  
-  // Add preHandler hook for all routes in this plugin (except callback which is public)
-  // Note: callback route is registered separately without this hook
+  const authenticate = devAuthenticateOrJwt;
   
   /**
    * GET /api/v1/marketplaces/amazon/status
@@ -42,9 +38,14 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
       });
 
       if (!connection) {
-        return reply.status(404).send({
-          error: "No Amazon connection found",
+        // Return DISCONNECTED status instead of 404 for wizard compatibility
+        return reply.send({
           connected: false,
+          status: "DISCONNECTED",
+          displayName: null,
+          region: null,
+          lastSyncAt: null,
+          lastError: null,
         });
       }
 
@@ -62,7 +63,7 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
   /**
    * POST /api/v1/marketplaces/amazon/oauth/start
    * Start Amazon OAuth flow (self-serve)
-   * Accepts: { tenantId?: string, connectionId: string }
+   * Accepts: { tenantId?: string, connectionId?: string }
    */
   server.post(
     "/api/v1/marketplaces/amazon/oauth/start",
@@ -79,15 +80,10 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
         
         // Determine tenantId: super_admin can specify, others use their own
         let targetTenantId: string;
-        if (user.role === "super_admin") {
-          if (!body.tenantId) {
-            return reply.status(400).send({
-              error: "tenantId required for super_admin",
-            });
-          }
+        if (user.role === "super_admin" && body.tenantId) {
           targetTenantId = body.tenantId;
         } else {
-          targetTenantId = user.tenantId; // Ignore body.tenantId for non-super_admin
+          targetTenantId = user.tenantId;
         }
 
         // Resolve MarketplaceConnection: connectionId is optional if tenantId is provided
@@ -109,47 +105,26 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
           }
         } else {
           // Find Amazon MarketplaceConnection for tenant (priority: CONNECTED > PENDING > most recent)
-          // Try CONNECTED first
           connection = await prisma.marketplaceConnection.findFirst({
             where: {
               tenantId: targetTenantId,
               type: MarketplaceType.AMAZON,
-              status: "CONNECTED",
             },
             orderBy: { updatedAt: "desc" },
           });
-          // If not found, try PENDING
+          
+          // If no connection exists, create one
           if (!connection) {
-            connection = await prisma.marketplaceConnection.findFirst({
-              where: {
+            connection = await prisma.marketplaceConnection.create({
+              data: {
                 tenantId: targetTenantId,
                 type: MarketplaceType.AMAZON,
                 status: "PENDING",
+                displayName: "Amazon (pending)",
+                region: "EU",
               },
-              orderBy: { updatedAt: "desc" },
             });
           }
-          // If still not found, try any status
-          if (!connection) {
-            connection = await prisma.marketplaceConnection.findFirst({
-              where: {
-                tenantId: targetTenantId,
-                type: MarketplaceType.AMAZON,
-              },
-              orderBy: { updatedAt: "desc" },
-            });
-          }
-          if (!connection) {
-            return reply.status(404).send({
-              error: "no_amazon_marketplace_connection_for_tenant",
-            });
-          }
-        }
-
-        if (!connection) {
-          return reply.status(404).send({
-            error: "Connection not found or does not belong to tenant",
-          });
         }
 
         // Generate OAuth URL with connectionId
@@ -173,11 +148,67 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
   );
 
   /**
+   * POST /api/v1/marketplaces/amazon/disconnect
+   * Disconnect Amazon connection for current tenant
+   */
+  server.post(
+    "/api/v1/marketplaces/amazon/disconnect",
+    { preHandler: authenticate },
+    async (request: FastifyRequest, reply) => {
+      const user = (request as FastifyRequest & { user: AuthUser }).user;
+      
+      if (!user || !user.tenantId) {
+        return reply.status(401).send({ error: "Unauthorized" });
+      }
+
+      try {
+        const connection = await prisma.marketplaceConnection.findFirst({
+          where: {
+            tenantId: user.tenantId,
+            type: MarketplaceType.AMAZON,
+          },
+        });
+
+        if (!connection) {
+          return reply.status(404).send({
+            error: "No Amazon connection found",
+          });
+        }
+
+        // Update status to DISABLED (represents disconnected)
+        await prisma.marketplaceConnection.update({
+          where: { id: connection.id },
+          data: {
+            status: "DISABLED",
+            lastError: "Disconnected by user",
+          },
+        });
+
+        // TODO: Delete refresh token from Vault if stored there
+        // For now, just mark as disconnected in DB
+
+        return reply.send({
+          success: true,
+          message: "Amazon connection disconnected",
+          previousStatus: connection.status,
+        });
+      } catch (error) {
+        console.error("[Amazon] Error disconnecting:", error);
+        return reply.status(500).send({
+          error: "Failed to disconnect Amazon",
+          details: (error as Error).message,
+        });
+      }
+    }
+  );
+
+  /**
    * POST /api/v1/marketplaces/amazon/mock/connect
    * Dev-only: Create CONNECTED connection for mock polling
    */
   server.post(
     "/api/v1/marketplaces/amazon/mock/connect",
+    { preHandler: authenticate },
     async (request: FastifyRequest, reply) => {
       const user = (request as FastifyRequest & { user: AuthUser }).user;
       
@@ -216,6 +247,7 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
   /**
    * GET /api/v1/marketplaces/amazon/oauth/callback
    * Amazon OAuth callback (handles redirect from Amazon)
+   * PUBLIC - no authentication required (Amazon redirects here)
    */
   server.get(
     "/api/v1/marketplaces/amazon/oauth/callback",
@@ -296,7 +328,7 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
           SET "usedAt" = NOW()
           WHERE id = ${oauthState.id}`;
 
-        // Success: return JSON response
+        // Return JSON response (client handles redirect via state param)
         return reply.send({
           success: true,
           message: "Amazon OAuth completed successfully",
