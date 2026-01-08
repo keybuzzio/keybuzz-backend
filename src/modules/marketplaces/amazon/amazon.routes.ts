@@ -4,6 +4,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { prisma } from "../../../lib/db";
 import { env } from "../../../config/env";
 import { ensureAmazonConnection } from "./amazon.service";
+import { ensureInboundConnection, buildInboundAddress, generateToken } from "../../inboundEmail/inboundEmailAddress.service";
 import { pollAmazonForTenant } from "./amazon.poller";
 import { MarketplaceType, Prisma } from "@prisma/client";
 import type { AuthUser } from "../../auth/auth.types";
@@ -323,6 +324,19 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
           sellingPartnerId,
         });
 
+        // PH15: Create inbound email address after CONNECTED
+        try {
+          await ensureInboundConnection({
+            tenantId: oauthState.tenantId,
+            marketplace: "amazon",
+            countries: ["FR"],
+          });
+          console.log("[Amazon OAuth] Inbound address created for", oauthState.tenantId);
+        } catch (inboundErr) {
+          console.warn("[Amazon OAuth] Failed to create inbound address:", inboundErr);
+          // Don't fail the whole callback for this
+        }
+
         // Mark state as used
         await prisma.$executeRaw`UPDATE "OAuthState"
           SET "usedAt" = NOW()
@@ -340,4 +354,96 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
       }
     }
   );
+
+  /**
+   * GET /api/v1/marketplaces/amazon/inbound-address
+   * Get inbound email address for tenant
+   */
+  server.get(
+    "/api/v1/marketplaces/amazon/inbound-address",
+    { preHandler: authenticate },
+    async (request, reply) => {
+      const user = (request as any).user;
+      
+      if (!user || !user.tenantId) {
+        return reply.status(401).send({ error: "Unauthorized" });
+      }
+
+      const tenantId = user.tenantId;
+      const country = (request.query as any).country || "FR";
+
+      try {
+        // First try to find existing address
+        const existingAddress = await prisma.inboundAddress.findUnique({
+          where: {
+            tenantId_marketplace_country: {
+              tenantId,
+              marketplace: "amazon",
+              country,
+            },
+          },
+        });
+
+        if (existingAddress) {
+          return reply.send({
+            address: existingAddress.emailAddress,
+            country: existingAddress.country,
+            status: existingAddress.pipelineStatus,
+          });
+        }
+
+        // Check if Amazon is connected
+        const connection = await prisma.marketplaceConnection.findFirst({
+          where: {
+            tenantId,
+            type: MarketplaceType.AMAZON,
+            status: "CONNECTED",
+          },
+        });
+
+        if (!connection) {
+          return reply.status(404).send({
+            error: "Amazon not connected",
+            message: "Connect Amazon first to get inbound address",
+          });
+        }
+
+        // Create address if connected but no address exists
+        await ensureInboundConnection({
+          tenantId,
+          marketplace: "amazon",
+          countries: [country],
+        });
+
+        // Fetch newly created address
+        const newAddress = await prisma.inboundAddress.findUnique({
+          where: {
+            tenantId_marketplace_country: {
+              tenantId,
+              marketplace: "amazon",
+              country,
+            },
+          },
+        });
+
+        if (newAddress) {
+          return reply.send({
+            address: newAddress.emailAddress,
+            country: newAddress.country,
+            status: newAddress.pipelineStatus,
+          });
+        }
+
+        return reply.status(500).send({ error: "Failed to create inbound address" });
+
+      } catch (error) {
+        console.error("[Amazon Inbound] Error:", error);
+        return reply.status(500).send({
+          error: "Failed to get inbound address",
+          details: (error as Error).message,
+        });
+      }
+    }
+  );
+
 }
