@@ -4,6 +4,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { prisma } from "../../../lib/db";
 import { env } from "../../../config/env";
 import { ensureAmazonConnection } from "./amazon.service";
+import { sendValidationEmail } from "../../inboundEmail/inboundEmailValidation.service";
 import { ensureInboundConnection, buildInboundAddress, generateToken } from "../../inboundEmail/inboundEmailAddress.service";
 import { pollAmazonForTenant } from "./amazon.poller";
 import { MarketplaceType, Prisma } from "@prisma/client";
@@ -440,6 +441,62 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
         console.error("[Amazon Inbound] Error:", error);
         return reply.status(500).send({
           error: "Failed to get inbound address",
+          details: (error as Error).message,
+        });
+      }
+    }
+  );
+
+
+
+  /**
+   * POST /api/v1/marketplaces/amazon/inbound-address/send-validation
+   * Send validation email to inbound address
+   */
+  server.post(
+    "/api/v1/marketplaces/amazon/inbound-address/send-validation",
+    { preHandler: authenticate },
+    async (request, reply) => {
+      const user = (request as any).user;
+      
+      if (!user || !user.tenantId) {
+        return reply.status(401).send({ error: "Unauthorized" });
+      }
+
+      const tenantId = user.tenantId;
+      const country = (request.body as any).country || "FR";
+
+      try {
+        // Find inbound connection for tenant/amazon
+        const connection = await prisma.inboundConnection.findUnique({
+          where: {
+            tenantId_marketplace: {
+              tenantId,
+              marketplace: "amazon",
+            },
+          },
+        });
+
+        if (!connection) {
+          return reply.status(404).send({
+            error: "No inbound connection",
+            message: "Create inbound address first",
+          });
+        }
+
+        // Send validation email
+        await sendValidationEmail(connection.id, country);
+
+        return reply.send({
+          ok: true,
+          message: "Validation email sent",
+          note: "The validation becomes effective upon receiving a message (or forwarded email).",
+        });
+
+      } catch (error) {
+        console.error("[Amazon Validation] Error:", error);
+        return reply.status(500).send({
+          error: "Failed to send validation email",
           details: (error as Error).message,
         });
       }
