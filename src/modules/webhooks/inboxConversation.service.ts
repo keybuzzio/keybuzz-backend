@@ -1,9 +1,11 @@
 /**
- * PH15-INBOUND-TO-CONVERSATION-01
+ * PH15-INBOUND-TO-CONVERSATION-01 + PH15-INBOUND-MESSAGE-NORMALIZATION-01
  * Service to create Inbox conversations and messages from inbound emails
+ * With message normalization for clean Inbox display
  */
 import { productDb } from '../../lib/productDb';
 import { randomBytes } from 'crypto';
+import { normalizeInboundMessage } from './messageNormalizer.service';
 
 // Generate cuid-like ID (compatible with existing data)
 function createId(): string {
@@ -27,25 +29,10 @@ interface ConversationResult {
   conversationId: string;
   messageId: string;
   isNew: boolean;
-}
-
-/**
- * Extract order reference from email content
- */
-function extractOrderRef(subject: string, body: string): string | null {
-  // Amazon order formats: 123-1234567-1234567, ORDER-xxx
-  const patterns = [
-    /\b(\d{3}-\d{7}-\d{7})\b/,  // Amazon order ID
-    /ORDER[:\s#-]*([A-Z0-9-]+)/i,
-    /commande[:\s#-]*([A-Z0-9-]+)/i,
-  ];
-  
-  const text = `${subject} ${body}`;
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    if (match) return match[1];
-  }
-  return null;
+  normalized: {
+    cleanBodyLength: number;
+    extractionMethod: string;
+  };
 }
 
 /**
@@ -61,17 +48,9 @@ function extractCustomerName(from: string): string {
 }
 
 /**
- * Truncate text for preview
- */
-function truncateForPreview(text: string, maxLen = 150): string {
-  const cleaned = text.replace(/\s+/g, ' ').trim();
-  if (cleaned.length <= maxLen) return cleaned;
-  return cleaned.substring(0, maxLen - 3) + '...';
-}
-
-/**
  * Create or find existing conversation, then add message
  * Idempotent based on messageId
+ * Now with message normalization!
  */
 export async function createInboxConversation(payload: InboundEmailPayload): Promise<ConversationResult> {
   const {
@@ -83,6 +62,23 @@ export async function createInboxConversation(payload: InboundEmailPayload): Pro
     messageId,
     receivedAt,
   } = payload;
+
+  // ===== PH15: NORMALIZE THE MESSAGE =====
+  const normalized = normalizeInboundMessage({
+    rawBody: body,
+    rawSubject: subject,
+    rawFrom: from,
+    rawTo: '', // Not always available
+    marketplace: marketplace,
+  });
+  
+  const cleanBody = normalized.cleanBody;
+  const preview = normalized.preview;
+  const metadata = normalized.metadata;
+  
+  // Use orderRef from metadata if not in payload
+  const orderRef = payload.orderRef || metadata.orderRef || null;
+  // ========================================
 
   // Build deterministic external_id for idempotency
   const externalId = `${marketplace}:${messageId}`;
@@ -99,13 +95,15 @@ export async function createInboxConversation(payload: InboundEmailPayload): Pro
       conversationId: existingMsg.rows[0].conversation_id,
       messageId: existingMsg.rows[0].id,
       isNew: false,
+      normalized: {
+        cleanBodyLength: cleanBody.length,
+        extractionMethod: metadata.extractionMethod,
+      },
     };
   }
 
-  const orderRef = extractOrderRef(subject, body) || payload.orderRef || null;
   const customerName = extractCustomerName(from);
   const customerHandle = from;
-  const preview = truncateForPreview(body);
   const now = receivedAt || new Date();
 
   // Calculate SLA (24h from now for Amazon)
@@ -149,7 +147,7 @@ export async function createInboxConversation(payload: InboundEmailPayload): Pro
         customerName,
         customerHandle,
         orderRef,
-        preview,
+        preview,  // Use normalized preview
         now,
         now,
         1,
@@ -163,29 +161,30 @@ export async function createInboxConversation(payload: InboundEmailPayload): Pro
     console.log(`[InboxConversation] Created conversation: ${conversationId}`);
   }
 
-  // Create message
+  // Create message with clean body and metadata
   const msgId = createId();
   await productDb.query(
     `INSERT INTO messages (
       id, conversation_id, tenant_id, direction, author_name, body,
-      created_at, visibility, message_source
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      created_at, visibility, message_source, metadata
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
     [
       msgId,
       conversationId,
       tenantId,
       'inbound',
       customerName,
-      body,
+      cleanBody,  // Use normalized clean body!
       now,
       'public',
       'HUMAN',
+      JSON.stringify(metadata),  // Store metadata as JSON
     ]
   );
 
-  console.log(`[InboxConversation] Created message: ${msgId}`);
+  console.log(`[InboxConversation] Created message: ${msgId}, cleanBodyLength=${cleanBody.length}`);
 
-  // Update conversation stats
+  // Update conversation stats with normalized preview
   await productDb.query(
     `UPDATE conversations SET
       last_message_preview = $1,
@@ -201,5 +200,9 @@ export async function createInboxConversation(payload: InboundEmailPayload): Pro
     conversationId,
     messageId: msgId,
     isNew: isNewConversation,
+    normalized: {
+      cleanBodyLength: cleanBody.length,
+      extractionMethod: metadata.extractionMethod,
+    },
   };
 }
