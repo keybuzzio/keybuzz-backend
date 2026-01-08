@@ -18,6 +18,7 @@ import { registerInboundEmailWebhookRoutes } from "./modules/webhooks/inboundEma
 import { registerInboundEmailRoutes } from "./modules/inboundEmail/inboundEmail.routes";
 import { registerOutboundRoutes } from "./modules/outbound/outbound.routes";
 import { registerOpsRoutes } from './modules/ops/ops.routes';
+import { registerTenantSyncRoutes } from "./modules/tenants/tenantSync.routes";
 
 async function bootstrap() {
   const app = Fastify({ 
@@ -69,6 +70,7 @@ async function bootstrap() {
   await registerInboundEmailRoutes(app);
   await registerOutboundRoutes(app);
   await registerOpsRoutes(app);
+  await registerTenantSyncRoutes(app);
 
   try {
     await app.listen({ port: env.PORT, host: "0.0.0.0" });
