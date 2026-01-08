@@ -328,20 +328,15 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
           SET "usedAt" = NOW()
           WHERE id = ${oauthState.id}`;
 
-        // Return JSON response (client handles redirect via state param)
-        return reply.send({
-          success: true,
-          message: "Amazon OAuth completed successfully",
-          tenantId: oauthState.tenantId,
-          connectionId: oauthState.connectionId,
-          sellingPartnerId,
-        });
+        // Redirect to client with success
+        const clientUrl = process.env.CLIENT_CALLBACK_URL || "https://client-dev.keybuzz.io/onboarding";
+        return reply.redirect(`${clientUrl}?amazon_connected=true&tenant_id=${oauthState.tenantId}`);
       } catch (error) {
         console.error("[Amazon OAuth] Callback error:", error);
-        return reply.status(500).send({
-          error: "Failed to complete Amazon OAuth",
-          details: (error as Error).message,
-        });
+        // Redirect to client with error
+        const clientUrl = process.env.CLIENT_CALLBACK_URL || "https://client-dev.keybuzz.io/onboarding";
+        const errorMsg = encodeURIComponent((error as Error).message);
+        return reply.redirect(`${clientUrl}?amazon_error=${errorMsg}`);
       }
     }
   );
