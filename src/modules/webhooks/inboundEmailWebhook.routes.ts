@@ -1,8 +1,9 @@
-// PH11-06B.5F + PH11-06B.6.2: Dedicated inbound email webhook with Amazon detection
+// PH15-INBOUND-TO-CONVERSATION-01: Inbound email webhook with conversation creation
 import type { FastifyInstance, FastifyPluginOptions } from "fastify";
 import { prisma } from "../../lib/db";
 import { MarketplaceType } from "@prisma/client";
 import { parseInboundAddress, processValidationEmail, updateMarketplaceStatusIfAmazon } from "../inbound/inbound.service";
+import { createInboxConversation } from "./inboxConversation.service";
 
 async function inboundEmailWebhookPlugin(server: FastifyInstance, _opts: FastifyPluginOptions) {
   /**
@@ -79,7 +80,6 @@ async function inboundEmailWebhookPlugin(server: FastifyInstance, _opts: Fastify
       }
 
       // For non-validation emails, check if it's an Amazon forward
-      // PH11-06B.6.2: Update marketplaceStatus if Amazon email detected
       const amazonUpdated = await updateMarketplaceStatusIfAmazon({
         tenantId,
         marketplace,
@@ -94,7 +94,7 @@ async function inboundEmailWebhookPlugin(server: FastifyInstance, _opts: Fastify
         console.log(`[Webhook] Amazon forward detected, marketplaceStatus updated for ${tenantId}/${country}`);
       }
 
-      // Idempotence check
+      // Idempotence check for ExternalMessage
       const existing = await prisma.externalMessage.findUnique({
         where: {
           type_connectionId_externalId: {
@@ -110,7 +110,7 @@ async function inboundEmailWebhookPlugin(server: FastifyInstance, _opts: Fastify
         return reply.send({ success: true, message: "Already processed", amazonForward: amazonUpdated });
       }
 
-      // Create ExternalMessage
+      // Create ExternalMessage (backend DB)
       const externalMessage = await prisma.externalMessage.create({
         data: {
           tenantId,
@@ -144,11 +144,30 @@ async function inboundEmailWebhookPlugin(server: FastifyInstance, _opts: Fastify
         },
       });
 
+      // PH15: Create Inbox conversation + message (product DB)
+      let conversationResult = null;
+      try {
+        conversationResult = await createInboxConversation({
+          tenantId,
+          marketplace: 'amazon',
+          from: payload.from,
+          subject: payload.subject || 'Message Amazon',
+          body: payload.body || '',
+          messageId: payload.messageId,
+          receivedAt: new Date(payload.receivedAt),
+        });
+        console.log("[Webhook] Inbox conversation created:", conversationResult);
+      } catch (convError) {
+        console.error("[Webhook] Failed to create Inbox conversation:", convError);
+        // Don't fail the whole request, ExternalMessage was already saved
+      }
+
       return reply.send({
         success: true,
         messageId: externalMessage.id,
         externalId: payload.messageId,
         amazonForward: amazonUpdated,
+        conversation: conversationResult,
       });
 
     } catch (error) {
