@@ -1,7 +1,7 @@
 /**
- * PH15-INBOUND-TO-CONVERSATION-01 + PH15-INBOUND-MESSAGE-NORMALIZATION-01
+ * PH15-INBOUND-TO-CONVERSATION-01 + PH15-AMAZON-THREADING-ENCODING-01
  * Service to create Inbox conversations and messages from inbound emails
- * With message normalization for clean Inbox display
+ * With message normalization and Amazon thread grouping
  */
 import { productDb } from '../../lib/productDb';
 import { randomBytes } from 'crypto';
@@ -23,15 +23,19 @@ interface InboundEmailPayload {
   messageId: string;
   receivedAt: Date;
   orderRef?: string;
+  headers?: Record<string, string>;
 }
 
 interface ConversationResult {
   conversationId: string;
   messageId: string;
   isNew: boolean;
+  isThreaded: boolean;  // PH15: Message was added to existing thread
   normalized: {
     cleanBodyLength: number;
     extractionMethod: string;
+    threadKey: string | null;
+    encodingFixed: boolean;
   };
 }
 
@@ -39,7 +43,6 @@ interface ConversationResult {
  * Extract customer name from email "from" field
  */
 function extractCustomerName(from: string): string {
-  // Format: "Name email@domain.com" or "Name <email@domain.com>"
   const match = from.match(/^([^<@]+)/);
   if (match) {
     return match[1].trim().replace(/["']/g, '');
@@ -49,8 +52,7 @@ function extractCustomerName(from: string): string {
 
 /**
  * Create or find existing conversation, then add message
- * Idempotent based on messageId
- * Now with message normalization!
+ * Now with Amazon thread grouping!
  */
 export async function createInboxConversation(payload: InboundEmailPayload): Promise<ConversationResult> {
   const {
@@ -61,32 +63,33 @@ export async function createInboxConversation(payload: InboundEmailPayload): Pro
     body,
     messageId,
     receivedAt,
+    headers = {},
   } = payload;
 
-  // ===== PH15: NORMALIZE THE MESSAGE =====
+  // ===== NORMALIZE THE MESSAGE =====
   const normalized = normalizeInboundMessage({
     rawBody: body,
     rawSubject: subject,
     rawFrom: from,
-    rawTo: '', // Not always available
+    rawTo: '',
     marketplace: marketplace,
+    headers: headers,
   });
   
   const cleanBody = normalized.cleanBody;
   const preview = normalized.preview;
   const metadata = normalized.metadata;
   
-  // Use orderRef from metadata if not in payload
   const orderRef = payload.orderRef || metadata.orderRef || null;
-  // ========================================
-
-  // Build deterministic external_id for idempotency
-  const externalId = `${marketplace}:${messageId}`;
+  const threadKey = metadata.threadKey || null;
   
-  // Check if message already exists
+  // ===== MESSAGE IDEMPOTENCY (based on messageId) =====
+  // Check if this specific message already exists
   const existingMsg = await productDb.query(
-    `SELECT id, conversation_id FROM messages WHERE tenant_id = $1 AND id LIKE $2`,
-    [tenantId, `%${messageId.substring(0, 20)}%`]
+    `SELECT id, conversation_id FROM messages 
+     WHERE tenant_id = $1 AND metadata->>'rawPreview' LIKE $2
+     LIMIT 1`,
+    [tenantId, `%${messageId.substring(0, 30)}%`]
   );
   
   if (existingMsg.rows.length > 0) {
@@ -95,9 +98,12 @@ export async function createInboxConversation(payload: InboundEmailPayload): Pro
       conversationId: existingMsg.rows[0].conversation_id,
       messageId: existingMsg.rows[0].id,
       isNew: false,
+      isThreaded: false,
       normalized: {
         cleanBodyLength: cleanBody.length,
         extractionMethod: metadata.extractionMethod,
+        threadKey,
+        encodingFixed: metadata.encodingFixed || false,
       },
     };
   }
@@ -105,27 +111,53 @@ export async function createInboxConversation(payload: InboundEmailPayload): Pro
   const customerName = extractCustomerName(from);
   const customerHandle = from;
   const now = receivedAt || new Date();
-
-  // Calculate SLA (24h from now for Amazon)
   const slaDueAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
 
-  // Try to find existing open conversation for same customer + orderRef
+  // ===== CONVERSATION GROUPING (PH15) =====
+  // Priority: threadKey > orderRef > new conversation
   let conversationId: string | null = null;
   let isNewConversation = false;
+  let isThreaded = false;
 
-  if (orderRef) {
-    const existingConv = await productDb.query(
+  // 1) Try to find by threadKey
+  if (threadKey) {
+    const existingByThread = await productDb.query(
+      `SELECT id FROM conversations 
+       WHERE tenant_id = $1 AND channel = $2 AND thread_key = $3 AND status = 'open'
+       ORDER BY created_at DESC LIMIT 1`,
+      [tenantId, marketplace.toLowerCase(), threadKey]
+    );
+    if (existingByThread.rows.length > 0) {
+      conversationId = existingByThread.rows[0].id;
+      isThreaded = true;
+      console.log(`[InboxConversation] Found existing conversation by threadKey: ${threadKey}`);
+    }
+  }
+
+  // 2) Fallback: try by orderRef (if no threadKey match)
+  if (!conversationId && orderRef) {
+    const existingByOrder = await productDb.query(
       `SELECT id FROM conversations 
        WHERE tenant_id = $1 AND channel = $2 AND order_ref = $3 AND status = 'open'
        ORDER BY created_at DESC LIMIT 1`,
       [tenantId, marketplace.toLowerCase(), orderRef]
     );
-    if (existingConv.rows.length > 0) {
-      conversationId = existingConv.rows[0].id;
+    if (existingByOrder.rows.length > 0) {
+      conversationId = existingByOrder.rows[0].id;
+      isThreaded = true;
+      console.log(`[InboxConversation] Found existing conversation by orderRef: ${orderRef}`);
+      
+      // Update thread_key if not set
+      if (threadKey) {
+        await productDb.query(
+          `UPDATE conversations SET thread_key = $1 WHERE id = $2 AND thread_key IS NULL`,
+          [threadKey, conversationId]
+        );
+      }
     }
   }
 
-  // Create new conversation if needed
+  // 3) Create new conversation if no match
   if (!conversationId) {
     conversationId = createId();
     isNewConversation = true;
@@ -133,10 +165,10 @@ export async function createInboxConversation(payload: InboundEmailPayload): Pro
     await productDb.query(
       `INSERT INTO conversations (
         id, tenant_id, subject, channel, status, priority,
-        customer_name, customer_handle, order_ref,
+        customer_name, customer_handle, order_ref, thread_key,
         last_message_preview, last_inbound_at, last_activity_at,
         messages_24h, sla_due_at, sla_state, created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
       [
         conversationId,
         tenantId,
@@ -147,7 +179,8 @@ export async function createInboxConversation(payload: InboundEmailPayload): Pro
         customerName,
         customerHandle,
         orderRef,
-        preview,  // Use normalized preview
+        threadKey,  // PH15: Store thread key
+        preview,
         now,
         now,
         1,
@@ -158,10 +191,10 @@ export async function createInboxConversation(payload: InboundEmailPayload): Pro
       ]
     );
 
-    console.log(`[InboxConversation] Created conversation: ${conversationId}`);
+    console.log(`[InboxConversation] Created new conversation: ${conversationId}, threadKey: ${threadKey}`);
   }
 
-  // Create message with clean body and metadata
+  // ===== CREATE MESSAGE =====
   const msgId = createId();
   await productDb.query(
     `INSERT INTO messages (
@@ -174,17 +207,17 @@ export async function createInboxConversation(payload: InboundEmailPayload): Pro
       tenantId,
       'inbound',
       customerName,
-      cleanBody,  // Use normalized clean body!
+      cleanBody,
       now,
       'public',
       'HUMAN',
-      JSON.stringify(metadata),  // Store metadata as JSON
+      JSON.stringify(metadata),
     ]
   );
 
-  console.log(`[InboxConversation] Created message: ${msgId}, cleanBodyLength=${cleanBody.length}`);
+  console.log(`[InboxConversation] Created message: ${msgId}, threaded=${isThreaded}`);
 
-  // Update conversation stats with normalized preview
+  // ===== UPDATE CONVERSATION STATS =====
   await productDb.query(
     `UPDATE conversations SET
       last_message_preview = $1,
@@ -200,9 +233,12 @@ export async function createInboxConversation(payload: InboundEmailPayload): Pro
     conversationId,
     messageId: msgId,
     isNew: isNewConversation,
+    isThreaded,
     normalized: {
       cleanBodyLength: cleanBody.length,
       extractionMethod: metadata.extractionMethod,
+      threadKey,
+      encodingFixed: metadata.encodingFixed || false,
     },
   };
 }

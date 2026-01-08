@@ -1,7 +1,9 @@
 /**
- * PH15-INBOUND-MESSAGE-NORMALIZATION-01
+ * PH15-INBOUND-MESSAGE-NORMALIZATION-01 + PH15-AMAZON-THREADING-ENCODING-01
  * Central message normalization service for all inbound messages
+ * With encoding fix (mojibake) and thread key extraction
  */
+import { createHash } from 'crypto';
 
 export interface NormalizedMessage {
   cleanBody: string;
@@ -17,11 +19,13 @@ export interface MessageMetadata {
   rawFrom?: string;
   rawTo?: string;
   orderRef?: string | null;
+  threadKey?: string | null;
   marketplaceLinks?: string[];
-  rawPreview?: string;  // First 2-4KB of raw content
+  rawPreview?: string;
+  encodingFixed?: boolean;
 }
 
-const PARSER_VERSION = 'v1.0';
+const PARSER_VERSION = 'v1.1';
 
 // Amazon-specific markers
 const AMAZON_MARKERS = {
@@ -29,7 +33,7 @@ const AMAZON_MARKERS = {
     '------------- Message:',
     '---- Message original ----',
     '--- Message acheteur ---',
-    'Message de l\'acheteur :',
+    "Message de l'acheteur :",
     'Buyer Message:',
     'Message from buyer:',
   ],
@@ -42,72 +46,228 @@ const AMAZON_MARKERS = {
 
 // Noise patterns to remove
 const NOISE_PATTERNS = [
-  // MIME boundaries
   /------=_Part_\d+/g,
   /Content-Type:\s*[^\n]+/gi,
   /Content-Transfer-Encoding:\s*[^\n]+/gi,
   /MIME-Version:\s*[^\n]+/gi,
   /boundary="[^"]+"/gi,
-  
-  // Amazon legal footers
   /Droits d'auteur[^]*$/i,
   /Important\s*:[^]*ne pas répondre[^]*$/i,
   /Cet e-mail a-t-il été utile\s*\?[^]*$/i,
   /We hope to see you again soon[^]*$/i,
   /Si vous avez des questions[^]*contactez le vendeur[^]*$/i,
-  
-  // Common email footers
   /---\s*\n\s*Envoyé depuis[^]*$/i,
   /Sent from my iPhone[^]*$/i,
   /Sent from my Android[^]*$/i,
-  
-  // Tracking links
   /https?:\/\/[^\s]+sellercentral[^\s]+/gi,
   /https?:\/\/[^\s]+amazon[^\s]*\/(gp\/help|hz\/feedback|messaging)[^\s]*/gi,
-  
-  // Reply markers
   /^>\s*.*$/gm,
   /^On .* wrote:$/gm,
   /^Le .* a écrit :$/gm,
 ];
 
-// Patterns to extract clean message from Amazon emails
 const AMAZON_EXTRACTION_PATTERNS = [
-  // Pattern 1: Between markers
   /------------- Message:\s*([\s\S]*?)\s*------------- Fin/i,
-  
-  // Pattern 2: After "Message de l'acheteur"
   /Message de l'acheteur\s*:\s*([\s\S]*?)(?:\n{2,}|---|\Z)/i,
-  
-  // Pattern 3: After "Buyer Message:"
   /Buyer Message:\s*([\s\S]*?)(?:\n{2,}|---|\Z)/i,
-  
-  // Pattern 4: Between "Message original" markers
   /---- Message original ----\s*([\s\S]*?)(?:----|\Z)/i,
 ];
 
+// =====================================================
+// PH15: ENCODING FIX - Mojibake detection and repair
+// =====================================================
+
+// Common mojibake patterns stored as hex codes to avoid encoding issues
+const MOJIBAKE_REPLACEMENTS: Array<[RegExp, string]> = [
+  // French accented chars (UTF-8 interpreted as Latin1)
+  [/\xc3\xa0/g, 'à'], [/\xc3\xa1/g, 'á'], [/\xc3\xa2/g, 'â'],
+  [/\xc3\xa3/g, 'ã'], [/\xc3\xa4/g, 'ä'], [/\xc3\xa5/g, 'å'],
+  [/\xc3\xa6/g, 'æ'], [/\xc3\xa7/g, 'ç'], [/\xc3\xa8/g, 'è'],
+  [/\xc3\xa9/g, 'é'], [/\xc3\xaa/g, 'ê'], [/\xc3\xab/g, 'ë'],
+  [/\xc3\xac/g, 'ì'], [/\xc3\xad/g, 'í'], [/\xc3\xae/g, 'î'],
+  [/\xc3\xaf/g, 'ï'], [/\xc3\xb0/g, 'ð'], [/\xc3\xb1/g, 'ñ'],
+  [/\xc3\xb2/g, 'ò'], [/\xc3\xb3/g, 'ó'], [/\xc3\xb4/g, 'ô'],
+  [/\xc3\xb5/g, 'õ'], [/\xc3\xb6/g, 'ö'], [/\xc3\xb8/g, 'ø'],
+  [/\xc3\xb9/g, 'ù'], [/\xc3\xba/g, 'ú'], [/\xc3\xbb/g, 'û'],
+  [/\xc3\xbc/g, 'ü'], [/\xc3\xbd/g, 'ý'], [/\xc3\xbe/g, 'þ'],
+  [/\xc3\xbf/g, 'ÿ'],
+  // Common string patterns (easier to match)
+  [/Ã /g, 'à'], [/Ã¡/g, 'á'], [/Ã¢/g, 'â'], [/Ã£/g, 'ã'],
+  [/Ã¤/g, 'ä'], [/Ã¥/g, 'å'], [/Ã¦/g, 'æ'], [/Ã§/g, 'ç'],
+  [/Ã¨/g, 'è'], [/Ã©/g, 'é'], [/Ãª/g, 'ê'], [/Ã«/g, 'ë'],
+  [/Ã¬/g, 'ì'], [/Ã­/g, 'í'], [/Ã®/g, 'î'], [/Ã¯/g, 'ï'],
+  [/Ã°/g, 'ð'], [/Ã±/g, 'ñ'], [/Ã²/g, 'ò'], [/Ã³/g, 'ó'],
+  [/Ã´/g, 'ô'], [/Ãµ/g, 'õ'], [/Ã¶/g, 'ö'], [/Ã¸/g, 'ø'],
+  [/Ã¹/g, 'ù'], [/Ãº/g, 'ú'], [/Ã»/g, 'û'], [/Ã¼/g, 'ü'],
+  [/Ã½/g, 'ý'], [/Ã¾/g, 'þ'], [/Ã¿/g, 'ÿ'],
+  // Smart quotes and dashes
+  [/â€™/g, "'"], [/â€œ/g, '"'], [/â€/g, '"'],
+  [/â€"/g, '–'], [/â€"/g, '—'], [/â€¦/g, '…'],
+  // Stray Â character (common artifact)
+  [/Â(?=[À-ÿ])/g, ''], [/Â /g, ' '], [/Â$/g, ''],
+];
+
 /**
- * Decode quoted-printable encoding
+ * Detect if text contains mojibake patterns
  */
+function hasMojibake(text: string): boolean {
+  // Check for common mojibake indicators
+  // UTF-8 chars misread as Latin1 produce these patterns
+  return text.includes('\u00c3') ||  // Ã character (common in mojibake)
+         text.includes('\u00e2\u0080') ||  // â€ sequence
+         (text.includes('\u00c2') && /[^\x00-\x7F]/.test(text));
+}
+
+/**
+ * Fix mojibake by applying replacement patterns
+ */
+function fixMojibake(text: string): { fixed: string; wasFixed: boolean } {
+  if (!hasMojibake(text)) {
+    return { fixed: text, wasFixed: false };
+  }
+  
+  let result = text;
+  for (const [pattern, replacement] of MOJIBAKE_REPLACEMENTS) {
+    result = result.replace(pattern, replacement);
+  }
+  
+  return { fixed: result, wasFixed: result !== text };
+}
+
+/**
+ * Try to re-encode text if it looks like UTF-8 misinterpreted as Latin1
+ */
+function tryReencodeAsUtf8(text: string): string {
+  try {
+    if (hasMojibake(text)) {
+      const buf = Buffer.from(text, 'latin1');
+      const reencoded = buf.toString('utf8');
+      if (!hasMojibake(reencoded) && reencoded.length > 0) {
+        return reencoded;
+      }
+    }
+  } catch {
+    // Ignore errors
+  }
+  return text;
+}
+
+/**
+ * Main encoding fix function
+ */
+function fixEncoding(text: string): { text: string; fixed: boolean } {
+  let result = tryReencodeAsUtf8(text);
+  let wasFixed = result !== text;
+  
+  const { fixed, wasFixed: mapFixed } = fixMojibake(result);
+  
+  return {
+    text: fixed,
+    fixed: wasFixed || mapFixed,
+  };
+}
+
+// =====================================================
+// PH15: THREAD KEY EXTRACTION
+// =====================================================
+
+/**
+ * Extract Amazon thread key from various sources
+ */
+function extractAmazonThreadKey(input: {
+  rawBody: string;
+  rawSubject?: string;
+  rawFrom?: string;
+  headers?: Record<string, string>;
+  marketplaceLinks?: string[];
+  orderRef?: string | null;
+}): string | null {
+  const { rawBody, rawSubject = '', rawFrom = '', headers = {}, marketplaceLinks = [], orderRef } = input;
+  
+  // A) Check headers for thread/case IDs
+  const headerKeys = Object.keys(headers).map(k => k.toLowerCase());
+  for (const key of headerKeys) {
+    if (key.includes('thread') || key.includes('case') || key.includes('conversation')) {
+      const value = headers[key];
+      if (value && value.length > 3) {
+        return 'header:' + value;
+      }
+    }
+  }
+  
+  // B) Extract from Seller Central URLs
+  for (const url of marketplaceLinks) {
+    try {
+      const urlMatch = url.match(/[?&]t=([^&]+)/);
+      if (urlMatch) {
+        return 'sc:' + urlMatch[1];
+      }
+      
+      const pathMatch = url.match(/\/messaging\/thread\/([^/?]+)/);
+      if (pathMatch) {
+        return 'sc:' + pathMatch[1];
+      }
+      
+      const caseMatch = url.match(/case[_-]?id[=:]([^&\s]+)/i);
+      if (caseMatch) {
+        return 'case:' + caseMatch[1];
+      }
+    } catch {
+      // Ignore URL parsing errors
+    }
+  }
+  
+  // Also search in body for URLs
+  const urlPattern = /https?:\/\/[^\s<>"]+/gi;
+  const bodyUrls = rawBody.match(urlPattern) || [];
+  for (const url of bodyUrls) {
+    if (url.includes('sellercentral') || url.includes('amazon')) {
+      const tMatch = url.match(/[?&]t=([^&]+)/);
+      if (tMatch) {
+        return 'sc:' + tMatch[1];
+      }
+    }
+  }
+  
+  // C) Fallback to orderRef
+  if (orderRef) {
+    return 'order:' + orderRef;
+  }
+  
+  // D) Hash-based fallback
+  const normalizedFrom = rawFrom.toLowerCase().replace(/[^a-z0-9@]/g, '');
+  const subjectCore = rawSubject.toLowerCase()
+    .replace(/^(re:|fwd?:|tr:|aw:)\s*/gi, '')
+    .replace(/[^a-z0-9]/g, '')
+    .substring(0, 50);
+  
+  if (subjectCore.length > 5) {
+    const hash = createHash('md5')
+      .update(normalizedFrom + ':' + subjectCore)
+      .digest('hex')
+      .substring(0, 12);
+    return 'hash:' + hash;
+  }
+  
+  return null;
+}
+
+// =====================================================
+// EXISTING FUNCTIONS (unchanged)
+// =====================================================
+
 function decodeQuotedPrintable(text: string): string {
   return text
-    // Soft line breaks
     .replace(/=\r?\n/g, '')
-    // Hex encoded characters
     .replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => 
       String.fromCharCode(parseInt(hex, 16))
     );
 }
 
-/**
- * Convert basic HTML to plain text
- */
 function htmlToPlainText(html: string): string {
   return html
-    // Remove scripts and styles
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-    // Convert common HTML entities
     .replace(/&nbsp;/gi, ' ')
     .replace(/&amp;/gi, '&')
     .replace(/&lt;/gi, '<')
@@ -115,42 +275,28 @@ function htmlToPlainText(html: string): string {
     .replace(/&quot;/gi, '"')
     .replace(/&#39;/gi, "'")
     .replace(/&euro;/gi, '€')
-    // Add line breaks for block elements
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/p>/gi, '\n\n')
     .replace(/<\/div>/gi, '\n')
     .replace(/<\/li>/gi, '\n')
     .replace(/<\/tr>/gi, '\n')
-    // Remove all remaining HTML tags
     .replace(/<[^>]+>/g, '')
-    // Decode remaining entities
     .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code)))
     .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCharCode(parseInt(code, 16)));
 }
 
-/**
- * Normalize whitespace and clean up text
- */
 function normalizeWhitespace(text: string): string {
   return text
-    // Normalize line endings
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n')
-    // Remove excessive blank lines (keep max 2)
     .replace(/\n{3,}/g, '\n\n')
-    // Trim lines
     .split('\n')
     .map(line => line.trim())
     .join('\n')
-    // Trim overall
     .trim();
 }
 
-/**
- * Extract Amazon message using markers
- */
 function extractAmazonMessage(text: string): { extracted: string | null; method: string } {
-  // Try each extraction pattern
   for (const pattern of AMAZON_EXTRACTION_PATTERNS) {
     const match = text.match(pattern);
     if (match && match[1]) {
@@ -161,13 +307,11 @@ function extractAmazonMessage(text: string): { extracted: string | null; method:
     }
   }
   
-  // Try finding message between any start/end marker combination
   for (const startMarker of AMAZON_MARKERS.messageStart) {
     const startIdx = text.indexOf(startMarker);
     if (startIdx !== -1) {
       const afterStart = text.substring(startIdx + startMarker.length);
       
-      // Look for end marker
       for (const endMarker of AMAZON_MARKERS.messageEnd) {
         const endIdx = afterStart.indexOf(endMarker);
         if (endIdx !== -1) {
@@ -178,7 +322,6 @@ function extractAmazonMessage(text: string): { extracted: string | null; method:
         }
       }
       
-      // No end marker found, take first meaningful paragraph
       const paragraphs = afterStart.split(/\n{2,}/);
       if (paragraphs.length > 0) {
         const firstPara = paragraphs[0].trim();
@@ -192,26 +335,19 @@ function extractAmazonMessage(text: string): { extracted: string | null; method:
   return { extracted: null, method: 'none' };
 }
 
-/**
- * Generic cleanup for any message source
- */
 function genericCleanup(text: string): string {
   let cleaned = text;
   
-  // Apply noise removal patterns
   for (const pattern of NOISE_PATTERNS) {
     cleaned = cleaned.replace(pattern, '');
   }
   
-  // Normalize whitespace
   cleaned = normalizeWhitespace(cleaned);
   
-  // If still too long, try to get first meaningful paragraphs
   if (cleaned.length > 2000) {
     const paragraphs = cleaned.split(/\n{2,}/);
     const meaningfulParagraphs = paragraphs.filter(p => {
       const trimmed = p.trim();
-      // Skip very short paragraphs and those that look like headers/footers
       return trimmed.length > 20 && 
              !trimmed.match(/^(important|attention|warning|note):/i) &&
              !trimmed.match(/droits d'auteur|copyright/i);
@@ -225,12 +361,9 @@ function genericCleanup(text: string): string {
   return cleaned;
 }
 
-/**
- * Extract Amazon order reference
- */
 function extractOrderRef(text: string): string | null {
   const patterns = [
-    /\b(\d{3}-\d{7}-\d{7})\b/,  // Amazon order ID: 123-1234567-1234567
+    /\b(\d{3}-\d{7}-\d{7})\b/,
     /order\s*#?\s*:?\s*(\d{3}-\d{7}-\d{7})/i,
     /commande\s*#?\s*:?\s*(\d{3}-\d{7}-\d{7})/i,
   ];
@@ -242,9 +375,6 @@ function extractOrderRef(text: string): string | null {
   return null;
 }
 
-/**
- * Extract marketplace links from message
- */
 function extractMarketplaceLinks(text: string): string[] {
   const links: string[] = [];
   const urlPattern = /https?:\/\/[^\s<>"{}|\\^`[\]]+/gi;
@@ -252,7 +382,6 @@ function extractMarketplaceLinks(text: string): string[] {
   
   for (const url of matches) {
     if (url.includes('amazon') || url.includes('sellercentral')) {
-      // Clean up the URL (remove trailing punctuation)
       const cleanUrl = url.replace(/[.,;:!?)\]]+$/, '');
       if (!links.includes(cleanUrl)) {
         links.push(cleanUrl);
@@ -260,12 +389,9 @@ function extractMarketplaceLinks(text: string): string[] {
     }
   }
   
-  return links.slice(0, 5); // Max 5 links
+  return links.slice(0, 5);
 }
 
-/**
- * Determine message source
- */
 function detectSource(rawBody: string, rawFrom: string): MessageMetadata['source'] {
   const fromLower = rawFrom.toLowerCase();
   const bodyLower = rawBody.toLowerCase();
@@ -285,35 +411,36 @@ function detectSource(rawBody: string, rawFrom: string): MessageMetadata['source
   return 'EMAIL';
 }
 
-/**
- * Main normalization function
- * Call this before inserting any inbound message into the DB
- */
+// =====================================================
+// MAIN NORMALIZATION FUNCTION
+// =====================================================
+
 export function normalizeInboundMessage(input: {
   rawBody: string;
   rawSubject?: string;
   rawFrom?: string;
   rawTo?: string;
   marketplace?: string;
+  headers?: Record<string, string>;
 }): NormalizedMessage {
-  const { rawBody, rawSubject = '', rawFrom = '', rawTo = '' } = input;
+  const { rawBody, rawSubject = '', rawFrom = '', rawTo = '', headers = {} } = input;
   
-  // Step 1: Detect source
   const source = input.marketplace?.toUpperCase() as MessageMetadata['source'] || 
                  detectSource(rawBody, rawFrom);
   
-  // Step 2: Decode MIME if needed
   let decoded = rawBody;
   if (decoded.includes('=?') || decoded.includes('=3D') || decoded.includes('=\r\n')) {
     decoded = decodeQuotedPrintable(decoded);
   }
   
-  // Step 3: Convert HTML if present
+  // FIX ENCODING (PH15)
+  const { text: encodingFixed, fixed: wasEncodingFixed } = fixEncoding(decoded);
+  decoded = encodingFixed;
+  
   if (decoded.includes('<html') || decoded.includes('<div') || decoded.includes('<p')) {
     decoded = htmlToPlainText(decoded);
   }
   
-  // Step 4: Extract clean message based on source
   let cleanBody: string;
   let extractionMethod: MessageMetadata['extractionMethod'] = 'generic_cleanup';
   
@@ -331,21 +458,34 @@ export function normalizeInboundMessage(input: {
     extractionMethod = source === 'EMAIL' ? 'email_cleanup' : 'generic_cleanup';
   }
   
-  // Step 5: Final cleanup
   cleanBody = normalizeWhitespace(cleanBody);
+  const { text: finalClean, fixed: cleanFixed } = fixEncoding(cleanBody);
+  cleanBody = finalClean;
   
-  // Ensure minimum content
   if (cleanBody.length < 3) {
     cleanBody = decoded.substring(0, 500).trim() || '[Message vide]';
     extractionMethod = 'raw';
   }
   
-  // Step 6: Generate preview (150 chars max)
   const preview = cleanBody.length > 150 
     ? cleanBody.substring(0, 147) + '...'
     : cleanBody;
   
-  // Step 7: Build metadata
+  const orderRef = extractOrderRef(rawBody) || extractOrderRef(rawSubject) || null;
+  const marketplaceLinks = extractMarketplaceLinks(rawBody);
+  
+  // Extract thread key (PH15)
+  const threadKey = source === 'AMAZON' 
+    ? extractAmazonThreadKey({
+        rawBody,
+        rawSubject,
+        rawFrom,
+        headers,
+        marketplaceLinks,
+        orderRef,
+      })
+    : null;
+  
   const metadata: MessageMetadata = {
     source,
     extractionMethod,
@@ -353,12 +493,14 @@ export function normalizeInboundMessage(input: {
     rawSubject: rawSubject || undefined,
     rawFrom: rawFrom || undefined,
     rawTo: rawTo || undefined,
-    orderRef: extractOrderRef(rawBody) || extractOrderRef(rawSubject) || undefined,
-    marketplaceLinks: extractMarketplaceLinks(rawBody),
-    rawPreview: rawBody.substring(0, 4000), // Max 4KB
+    orderRef,
+    threadKey,
+    marketplaceLinks,
+    rawPreview: rawBody.substring(0, 4000),
+    encodingFixed: wasEncodingFixed || cleanFixed,
   };
   
-  console.log(`[MessageNormalizer] Normalized message: source=${source}, method=${extractionMethod}, cleanLength=${cleanBody.length}`);
+  console.log('[MessageNormalizer] source=' + source + ', method=' + extractionMethod + ', threadKey=' + threadKey + ', encodingFixed=' + metadata.encodingFixed);
   
   return {
     cleanBody,
