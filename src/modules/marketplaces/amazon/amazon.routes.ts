@@ -78,7 +78,7 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
       }
 
       try {
-        const body = request.body as { tenantId?: string; connectionId?: string };
+        const body = request.body as { tenantId?: string; connectionId?: string; return_url?: string };
         
         // Determine tenantId: super_admin can specify, others use their own
         let targetTenantId: string;
@@ -130,7 +130,7 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
         }
 
         // Generate OAuth URL with connectionId
-        const oauthData = await generateAmazonOAuthUrl(targetTenantId, connection.id);
+        const oauthData = await generateAmazonOAuthUrl(targetTenantId, connection.id, body.return_url);
 
         return reply.send({
           success: true,
@@ -287,7 +287,7 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
 
       try {
         // Resolve state → (tenantId, connectionId) from OAuthState
-        const oauthStateResult = await prisma.$queryRaw<Array<{id: string; tenantId: string; connectionId: string; expiresAt: Date; usedAt: Date | null}>>`SELECT id, "tenantId", "connectionId", "expiresAt", "usedAt"
+        const oauthStateResult = await prisma.$queryRaw<Array<{id: string; tenantId: string; connectionId: string; returnTo: string | null; expiresAt: Date; usedAt: Date | null}>>`SELECT id, "tenantId", "connectionId", "returnTo", "expiresAt", "usedAt"
           FROM "OAuthState"
           WHERE "marketplaceType" = ${MarketplaceType.AMAZON}::"MarketplaceType"
           AND state = ${state}
@@ -344,12 +344,14 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
           WHERE id = ${oauthState.id}`;
 
         // Redirect to client with success
-        const clientUrl = process.env.CLIENT_CALLBACK_URL || "https://client-dev.keybuzz.io/onboarding";
+        // PH15: Use returnUrl from state if provided, else default
+        const clientUrl = oauthState.returnTo || process.env.CLIENT_CALLBACK_URL || "https://client-dev.keybuzz.io/onboarding";
         return reply.redirect(`${clientUrl}?amazon_connected=true&tenant_id=${oauthState.tenantId}`);
       } catch (error) {
         console.error("[Amazon OAuth] Callback error:", error);
         // Redirect to client with error
-        const clientUrl = process.env.CLIENT_CALLBACK_URL || "https://client-dev.keybuzz.io/onboarding";
+        // PH15: Use returnUrl from state if provided
+        const clientUrl = oauthState?.returnUrl || process.env.CLIENT_CALLBACK_URL || "https://client-dev.keybuzz.io/onboarding";
         const errorMsg = encodeURIComponent((error as Error).message);
         return reply.redirect(`${clientUrl}?amazon_error=${errorMsg}`);
       }

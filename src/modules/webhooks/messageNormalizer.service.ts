@@ -1,7 +1,7 @@
 /**
- * PH15-INBOUND-MESSAGE-NORMALIZATION-01 + PH15-AMAZON-THREADING-ENCODING-01
+ * PH15-INBOUND-MESSAGE-NORMALIZATION-01 + PH15-AMAZON-THREADING-ENCODING-01 + PH15-AMAZON-IDS
  * Central message normalization service for all inbound messages
- * With encoding fix (mojibake) and thread key extraction
+ * With encoding fix (mojibake), thread key extraction, and Amazon ID parsing
  */
 import { createHash } from 'crypto';
 
@@ -21,11 +21,17 @@ export interface MessageMetadata {
   orderRef?: string | null;
   threadKey?: string | null;
   marketplaceLinks?: string[];
+  amazonIds?: {
+    threadId?: string;
+    messageId?: string;
+    customerId?: string;
+    marketplaceId?: string;
+  };
   rawPreview?: string;
   encodingFixed?: boolean;
 }
 
-const PARSER_VERSION = 'v1.1';
+const PARSER_VERSION = 'v1.2';
 
 // Amazon-specific markers
 const AMAZON_MARKERS = {
@@ -77,9 +83,7 @@ const AMAZON_EXTRACTION_PATTERNS = [
 // PH15: ENCODING FIX - Mojibake detection and repair
 // =====================================================
 
-// Common mojibake patterns stored as hex codes to avoid encoding issues
 const MOJIBAKE_REPLACEMENTS: Array<[RegExp, string]> = [
-  // French accented chars (UTF-8 interpreted as Latin1)
   [/\xc3\xa0/g, 'à'], [/\xc3\xa1/g, 'á'], [/\xc3\xa2/g, 'â'],
   [/\xc3\xa3/g, 'ã'], [/\xc3\xa4/g, 'ä'], [/\xc3\xa5/g, 'å'],
   [/\xc3\xa6/g, 'æ'], [/\xc3\xa7/g, 'ç'], [/\xc3\xa8/g, 'è'],
@@ -91,7 +95,6 @@ const MOJIBAKE_REPLACEMENTS: Array<[RegExp, string]> = [
   [/\xc3\xb9/g, 'ù'], [/\xc3\xba/g, 'ú'], [/\xc3\xbb/g, 'û'],
   [/\xc3\xbc/g, 'ü'], [/\xc3\xbd/g, 'ý'], [/\xc3\xbe/g, 'þ'],
   [/\xc3\xbf/g, 'ÿ'],
-  // Common string patterns (easier to match)
   [/Ã /g, 'à'], [/Ã¡/g, 'á'], [/Ã¢/g, 'â'], [/Ã£/g, 'ã'],
   [/Ã¤/g, 'ä'], [/Ã¥/g, 'å'], [/Ã¦/g, 'æ'], [/Ã§/g, 'ç'],
   [/Ã¨/g, 'è'], [/Ã©/g, 'é'], [/Ãª/g, 'ê'], [/Ã«/g, 'ë'],
@@ -100,27 +103,17 @@ const MOJIBAKE_REPLACEMENTS: Array<[RegExp, string]> = [
   [/Ã´/g, 'ô'], [/Ãµ/g, 'õ'], [/Ã¶/g, 'ö'], [/Ã¸/g, 'ø'],
   [/Ã¹/g, 'ù'], [/Ãº/g, 'ú'], [/Ã»/g, 'û'], [/Ã¼/g, 'ü'],
   [/Ã½/g, 'ý'], [/Ã¾/g, 'þ'], [/Ã¿/g, 'ÿ'],
-  // Smart quotes and dashes
   [/â€™/g, "'"], [/â€œ/g, '"'], [/â€/g, '"'],
   [/â€"/g, '–'], [/â€"/g, '—'], [/â€¦/g, '…'],
-  // Stray Â character (common artifact)
   [/Â(?=[À-ÿ])/g, ''], [/Â /g, ' '], [/Â$/g, ''],
 ];
 
-/**
- * Detect if text contains mojibake patterns
- */
 function hasMojibake(text: string): boolean {
-  // Check for common mojibake indicators
-  // UTF-8 chars misread as Latin1 produce these patterns
-  return text.includes('\u00c3') ||  // Ã character (common in mojibake)
-         text.includes('\u00e2\u0080') ||  // â€ sequence
+  return text.includes('\u00c3') ||
+         text.includes('\u00e2\u0080') ||
          (text.includes('\u00c2') && /[^\x00-\x7F]/.test(text));
 }
 
-/**
- * Fix mojibake by applying replacement patterns
- */
 function fixMojibake(text: string): { fixed: string; wasFixed: boolean } {
   if (!hasMojibake(text)) {
     return { fixed: text, wasFixed: false };
@@ -134,9 +127,6 @@ function fixMojibake(text: string): { fixed: string; wasFixed: boolean } {
   return { fixed: result, wasFixed: result !== text };
 }
 
-/**
- * Try to re-encode text if it looks like UTF-8 misinterpreted as Latin1
- */
 function tryReencodeAsUtf8(text: string): string {
   try {
     if (hasMojibake(text)) {
@@ -152,9 +142,6 @@ function tryReencodeAsUtf8(text: string): string {
   return text;
 }
 
-/**
- * Main encoding fix function
- */
 function fixEncoding(text: string): { text: string; fixed: boolean } {
   let result = tryReencodeAsUtf8(text);
   let wasFixed = result !== text;
@@ -168,23 +155,73 @@ function fixEncoding(text: string): { text: string; fixed: boolean } {
 }
 
 // =====================================================
-// PH15: THREAD KEY EXTRACTION
+// PH15: AMAZON ID EXTRACTION
 // =====================================================
 
 /**
- * Extract Amazon thread key from various sources
+ * Extract all Amazon IDs from message body URLs
+ * Decodes quoted-printable URLs like =3D -> =
  */
+function extractAmazonIds(rawBody: string): MessageMetadata['amazonIds'] {
+  const result: MessageMetadata['amazonIds'] = {};
+  
+  // Decode quoted-printable in URLs
+  const decodeQP = (str: string): string => {
+    return str
+      .replace(/=\r?\n/g, '')
+      .replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+  };
+  
+  const decodedBody = decodeQP(rawBody);
+  
+  // Extract t= (thread ID)
+  const threadMatch = decodedBody.match(/[?&]t=([A-Z0-9]+)/i);
+  if (threadMatch) {
+    result.threadId = threadMatch[1];
+  }
+  
+  // Extract m= (message ID)
+  const messageMatch = decodedBody.match(/[?&]m=([A-Z0-9]+)/i);
+  if (messageMatch) {
+    result.messageId = messageMatch[1];
+  }
+  
+  // Extract c= (customer/case ID)
+  const customerMatch = decodedBody.match(/[?&]c=([A-Z0-9]+)/i);
+  if (customerMatch) {
+    result.customerId = customerMatch[1];
+  }
+  
+  // Extract mp= (marketplace ID)
+  const marketplaceMatch = decodedBody.match(/[?&]mp=([A-Z0-9]+)/i);
+  if (marketplaceMatch) {
+    result.marketplaceId = marketplaceMatch[1];
+  }
+  
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+// =====================================================
+// PH15: THREAD KEY EXTRACTION
+// =====================================================
+
 function extractAmazonThreadKey(input: {
   rawBody: string;
   rawSubject?: string;
   rawFrom?: string;
   headers?: Record<string, string>;
   marketplaceLinks?: string[];
+  amazonIds?: MessageMetadata['amazonIds'];
   orderRef?: string | null;
 }): string | null {
-  const { rawBody, rawSubject = '', rawFrom = '', headers = {}, marketplaceLinks = [], orderRef } = input;
+  const { rawBody, rawSubject = '', rawFrom = '', headers = {}, marketplaceLinks = [], amazonIds, orderRef } = input;
   
-  // A) Check headers for thread/case IDs
+  // A) Use threadId from amazonIds if available
+  if (amazonIds?.threadId) {
+    return 'sc:' + amazonIds.threadId;
+  }
+  
+  // B) Check headers for thread/case IDs
   const headerKeys = Object.keys(headers).map(k => k.toLowerCase());
   for (const key of headerKeys) {
     if (key.includes('thread') || key.includes('case') || key.includes('conversation')) {
@@ -195,7 +232,7 @@ function extractAmazonThreadKey(input: {
     }
   }
   
-  // B) Extract from Seller Central URLs
+  // C) Extract from Seller Central URLs
   for (const url of marketplaceLinks) {
     try {
       const urlMatch = url.match(/[?&]t=([^&]+)/);
@@ -217,9 +254,13 @@ function extractAmazonThreadKey(input: {
     }
   }
   
-  // Also search in body for URLs
+  // D) Also search in body for URLs (with QP decoding)
+  const decodedBody = rawBody
+    .replace(/=\r?\n/g, '')
+    .replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+  
   const urlPattern = /https?:\/\/[^\s<>"]+/gi;
-  const bodyUrls = rawBody.match(urlPattern) || [];
+  const bodyUrls = decodedBody.match(urlPattern) || [];
   for (const url of bodyUrls) {
     if (url.includes('sellercentral') || url.includes('amazon')) {
       const tMatch = url.match(/[?&]t=([^&]+)/);
@@ -229,12 +270,12 @@ function extractAmazonThreadKey(input: {
     }
   }
   
-  // C) Fallback to orderRef
+  // E) Fallback to orderRef
   if (orderRef) {
     return 'order:' + orderRef;
   }
   
-  // D) Hash-based fallback
+  // F) Hash-based fallback
   const normalizedFrom = rawFrom.toLowerCase().replace(/[^a-z0-9@]/g, '');
   const subjectCore = rawSubject.toLowerCase()
     .replace(/^(re:|fwd?:|tr:|aw:)\s*/gi, '')
@@ -474,6 +515,9 @@ export function normalizeInboundMessage(input: {
   const orderRef = extractOrderRef(rawBody) || extractOrderRef(rawSubject) || null;
   const marketplaceLinks = extractMarketplaceLinks(rawBody);
   
+  // PH15: Extract Amazon IDs from URLs
+  const amazonIds = source === 'AMAZON' ? extractAmazonIds(rawBody) : undefined;
+  
   // Extract thread key (PH15)
   const threadKey = source === 'AMAZON' 
     ? extractAmazonThreadKey({
@@ -482,6 +526,7 @@ export function normalizeInboundMessage(input: {
         rawFrom,
         headers,
         marketplaceLinks,
+        amazonIds,
         orderRef,
       })
     : null;
@@ -496,11 +541,12 @@ export function normalizeInboundMessage(input: {
     orderRef,
     threadKey,
     marketplaceLinks,
+    amazonIds,
     rawPreview: rawBody.substring(0, 4000),
     encodingFixed: wasEncodingFixed || cleanFixed,
   };
   
-  console.log('[MessageNormalizer] source=' + source + ', method=' + extractionMethod + ', threadKey=' + threadKey + ', encodingFixed=' + metadata.encodingFixed);
+  console.log('[MessageNormalizer] source=' + source + ', method=' + extractionMethod + ', threadKey=' + threadKey + ', amazonIds=' + JSON.stringify(amazonIds) + ', encodingFixed=' + metadata.encodingFixed);
   
   return {
     cleanBody,
