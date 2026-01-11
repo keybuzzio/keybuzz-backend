@@ -693,3 +693,92 @@ model OAuthState {
   @@index([tenantId])
   @@index([connectionId])
 }
+// PH15-AMAZON-BACKFILL-ORDERS-01: Amazon Orders model
+// ============================================
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  RETURNED
+}
+
+enum DeliveryStatus {
+  PREPARING
+  SHIPPED
+  IN_TRANSIT
+  OUT_FOR_DELIVERY
+  DELIVERED
+  DELAYED
+  LOST
+}
+
+enum SavStatus {
+  NONE
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+}
+
+enum SlaStatus {
+  OK
+  AT_RISK
+  BREACHED
+}
+
+model Order {
+  id              String         @id @default(cuid())
+  tenantId        String
+  externalOrderId String         // Amazon Order ID
+  orderRef        String?        // Human readable reference
+  marketplace     MarketplaceType @default(AMAZON)
+  
+  // Customer info
+  customerName    String
+  customerEmail   String?
+  
+  // Order details
+  orderDate       DateTime
+  currency        String         @default("EUR")
+  totalAmount     Float
+  
+  // Status
+  orderStatus     OrderStatus    @default(PENDING)
+  deliveryStatus  DeliveryStatus @default(PREPARING)
+  savStatus       SavStatus      @default(NONE)
+  slaStatus       SlaStatus      @default(OK)
+  
+  // Shipping info
+  carrier         String?
+  trackingCode    String?
+  shippingAddress Json?
+  
+  // Timestamps
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  shippedAt       DateTime?
+  deliveredAt     DateTime?
+  
+  // Relations
+  items           OrderItem[]
+  
+  @@unique([tenantId, marketplace, externalOrderId])
+  @@index([tenantId, orderDate])
+  @@index([tenantId, orderStatus])
+}
+
+model OrderItem {
+  id          String  @id @default(cuid())
+  orderId     String
+  order       Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  
+  sku         String?
+  asin        String?
+  title       String
+  quantity    Int
+  unitPrice   Float
+  
+  @@index([orderId])
+}

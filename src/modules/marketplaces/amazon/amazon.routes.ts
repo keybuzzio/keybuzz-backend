@@ -351,7 +351,7 @@ export async function registerAmazonRoutes(server: FastifyInstance) {
         console.error("[Amazon OAuth] Callback error:", error);
         // Redirect to client with error
         // PH15: Use returnUrl from state if provided
-        const clientUrl = oauthState?.returnUrl || process.env.CLIENT_CALLBACK_URL || "https://client-dev.keybuzz.io/onboarding";
+        const clientUrl = process.env.CLIENT_CALLBACK_URL || "https://client-dev.keybuzz.io/onboarding";
         const errorMsg = encodeURIComponent((error as Error).message);
         return reply.redirect(`${clientUrl}?amazon_error=${errorMsg}`);
       }

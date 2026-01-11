@@ -1,0 +1,85 @@
+// src/modules/marketplaces/amazon/amazonOrders.routes.ts
+// PH15-AMAZON-BACKFILL-ORDERS-01: Amazon Orders routes
+
+import type { FastifyInstance, FastifyRequest } from "fastify";
+import { devAuthenticateOrJwt } from "../../../lib/devAuthMiddleware";
+import { backfillAmazonOrders, getOrdersForTenant } from "./amazonOrders.service";
+import type { AuthUser } from "../../auth/auth.types";
+
+export async function registerAmazonOrdersRoutes(server: FastifyInstance) {
+  const authenticate = devAuthenticateOrJwt;
+  
+  /**
+   * GET /api/v1/orders
+   * List orders for current tenant
+   */
+  server.get(
+    "/api/v1/orders",
+    { preHandler: authenticate },
+    async (request: FastifyRequest, reply) => {
+      const user = (request as FastifyRequest & { user: AuthUser }).user;
+      
+      if (!user || !user.tenantId) {
+        return reply.status(401).send({ error: "Unauthorized" });
+      }
+      
+      const query = request.query as { limit?: string; offset?: string };
+      const limit = Math.min(parseInt(query.limit || "50"), 100);
+      const offset = parseInt(query.offset || "0");
+      
+      try {
+        const orders = await getOrdersForTenant({
+          tenantId: user.tenantId,
+          limit,
+          offset,
+        });
+        
+        return reply.send({ orders, count: orders.length });
+      } catch (error) {
+        console.error("[Orders] List error:", error);
+        return reply.status(500).send({ error: "Failed to list orders" });
+      }
+    }
+  );
+  
+  /**
+   * POST /api/v1/orders/backfill
+   * Backfill Amazon orders
+   */
+  server.post(
+    "/api/v1/orders/backfill",
+    { preHandler: authenticate },
+    async (request: FastifyRequest, reply) => {
+      const user = (request as FastifyRequest & { user: AuthUser }).user;
+      
+      if (!user || !user.tenantId) {
+        return reply.status(401).send({ error: "Unauthorized" });
+      }
+      
+      const body = request.body as { days?: number };
+      const days = Math.min(body.days || 90, 365);
+      
+      console.log(`[Orders Backfill] Starting ${days}-day backfill for ${user.tenantId}`);
+      
+      try {
+        const result = await backfillAmazonOrders({
+          tenantId: user.tenantId,
+          days,
+          onProgress: (count) => console.log(`[Orders Backfill] Progress: ${count}`),
+        });
+        
+        return reply.send({
+          success: true,
+          imported: result.imported,
+          errors: result.errors.slice(0, 10),
+        });
+      } catch (error) {
+        console.error("[Orders Backfill] Error:", error);
+        return reply.status(500).send({
+          error: "Backfill failed",
+          details: (error as Error).message,
+        });
+      }
+    }
+  );
+}
