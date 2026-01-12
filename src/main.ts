@@ -19,6 +19,7 @@ import { registerInboundEmailRoutes } from "./modules/inboundEmail/inboundEmail.
 import { registerOutboundRoutes } from "./modules/outbound/outbound.routes";
 import { registerOpsRoutes } from './modules/ops/ops.routes';
 import { registerTenantSyncRoutes } from "./modules/tenants/tenantSync.routes";
+import { registerAmazonFeesRoutes } from "./modules/marketplaces/amazon/amazonFees.routes";
 
 async function bootstrap() {
   const app = Fastify({ 
@@ -55,6 +56,7 @@ async function bootstrap() {
   await registerInboundEmailWebhookRoutes(app);
   await registerPublicMarketplaceRoutes(app);
   registerHealthRoutes(app);
+  await registerAmazonFeesRoutes(app);
 
   // ========================================
   // AUTHENTICATED ROUTES (JWT required)

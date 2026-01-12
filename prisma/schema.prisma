@@ -679,22 +679,37 @@ model MarketplaceOutboundMessage {
 }
 
 model OAuthState {
-  id            String   @id @default(cuid())
+  id              String          @id @default(cuid())
   marketplaceType MarketplaceType @default(AMAZON)
-  state         String   // OAuth state token (anti-CSRF)
-  tenantId      String
-  connectionId String   // MarketplaceConnection id (required)
-  expiresAt     DateTime
-  usedAt        DateTime?
-  createdAt     DateTime @default(now())
+  state           String // OAuth state token (anti-CSRF)
+  tenantId        String
+  connectionId    String // MarketplaceConnection id (required)
+  expiresAt       DateTime
+  usedAt          DateTime?
+  createdAt       DateTime        @default(now())
 
   @@unique([marketplaceType, state])
   @@index([expiresAt])
   @@index([tenantId])
   @@index([connectionId])
 }
+
 // PH15-AMAZON-BACKFILL-ORDERS-01: Amazon Orders model
 // ============================================
+
+// PH15-TRACKING: Fulfillment channel and tracking source
+enum FulfillmentChannel {
+  FBM // Merchant Fulfilled Network
+  FBA // Fulfilled by Amazon
+  UNKNOWN
+}
+
+enum TrackingSource {
+  ORDERS_API // From Amazon Orders API (carrier only)
+  REPORTS // From Amazon Reports API (full tracking)
+  AMAZON_FBA // FBA - tracking via Amazon
+  NOT_AVAILABLE // No tracking available
+}
 
 enum OrderStatus {
   PENDING
@@ -729,56 +744,59 @@ enum SlaStatus {
 }
 
 model Order {
-  id              String         @id @default(cuid())
+  id              String          @id @default(cuid())
   tenantId        String
-  externalOrderId String         // Amazon Order ID
-  orderRef        String?        // Human readable reference
+  externalOrderId String // Amazon Order ID
+  orderRef        String? // Human readable reference
   marketplace     MarketplaceType @default(AMAZON)
-  
+
   // Customer info
-  customerName    String
-  customerEmail   String?
-  
+  customerName  String
+  customerEmail String?
+
   // Order details
-  orderDate       DateTime
-  currency        String         @default("EUR")
-  totalAmount     Float
-  
+  orderDate   DateTime
+  currency    String   @default("EUR")
+  totalAmount Float
+
   // Status
-  orderStatus     OrderStatus    @default(PENDING)
-  deliveryStatus  DeliveryStatus @default(PREPARING)
-  savStatus       SavStatus      @default(NONE)
-  slaStatus       SlaStatus      @default(OK)
-  
+  orderStatus    OrderStatus    @default(PENDING)
+  deliveryStatus DeliveryStatus @default(PREPARING)
+  savStatus      SavStatus      @default(NONE)
+  slaStatus      SlaStatus      @default(OK)
+
   // Shipping info
-  carrier         String?
-  trackingCode    String?
-  shippingAddress Json?
-  
+  fulfillmentChannel FulfillmentChannel @default(UNKNOWN)
+  carrier            String?
+  trackingCode       String?
+  trackingUrl        String?
+  trackingSource     TrackingSource     @default(NOT_AVAILABLE)
+  shippingAddress    Json?
+
   // Timestamps
-  createdAt       DateTime       @default(now())
-  updatedAt       DateTime       @updatedAt
-  shippedAt       DateTime?
-  deliveredAt     DateTime?
-  
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  shippedAt   DateTime?
+  deliveredAt DateTime?
+
   // Relations
-  items           OrderItem[]
-  
+  items OrderItem[]
+
   @@unique([tenantId, marketplace, externalOrderId])
   @@index([tenantId, orderDate])
   @@index([tenantId, orderStatus])
 }
 
 model OrderItem {
-  id          String  @id @default(cuid())
-  orderId     String
-  order       Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  
-  sku         String?
-  asin        String?
-  title       String
-  quantity    Int
-  unitPrice   Float
-  
+  id      String @id @default(cuid())
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  sku       String?
+  asin      String?
+  title     String
+  quantity  Int
+  unitPrice Float
+
   @@index([orderId])
 }

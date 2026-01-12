@@ -1,11 +1,11 @@
 // src/modules/marketplaces/amazon/amazonOrders.service.ts
-// PH15-TRACKING-PROVENANCE-AUDIT-01: Amazon Orders with REAL carrier from SP-API
+// PH15-TRACKING-REAL-MULTI-FULFILLMENT-01: Amazon Orders with FBM/FBA support
 
 import { prisma } from "../../../lib/db";
 import { getAccessToken } from "./amazon.tokens";
 import { getAmazonTenantCredentials } from "./amazon.vault";
-import { MarketplaceType, OrderStatus, DeliveryStatus, SavStatus, SlaStatus } from "@prisma/client";
-import { getTrackingInfo } from "./carrierTracking.service";
+import { MarketplaceType, OrderStatus, DeliveryStatus, FulfillmentChannel, TrackingSource } from "@prisma/client";
+import { normalizeCarrierName, buildTrackingUrl } from "./carrierTracking.service";
 
 const SPAPI_ENDPOINTS: Record<string, string> = {
   "eu-west-1": "https://sellingpartnerapi-eu.amazon.com",
@@ -17,19 +17,17 @@ interface AmazonOrder {
   AmazonOrderId: string;
   PurchaseDate: string;
   OrderStatus: string;
-  FulfillmentChannel: string;
+  FulfillmentChannel: string; // MFN = FBM, AFN = FBA
   OrderTotal?: { Amount: string; CurrencyCode: string };
   BuyerInfo?: { BuyerEmail?: string; BuyerName?: string };
   ShippingAddress?: { Name?: string; AddressLine1?: string; City?: string; PostalCode?: string; CountryCode?: string };
   NumberOfItemsShipped?: number;
   NumberOfItemsUnshipped?: number;
-  // PH15-TRACKING: Add carrier fields from SP-API
   AutomatedShippingSettings?: {
     AutomatedCarrier?: string;
     AutomatedCarrierName?: string;
     HasAutomatedShippingSettings?: boolean;
   };
-  ShipServiceLevel?: string;
 }
 
 interface AmazonOrderItem {
@@ -62,7 +60,16 @@ function mapDeliveryStatus(order: AmazonOrder): DeliveryStatus {
   return "PREPARING";
 }
 
-// PH15-TRACKING: Extract carrier from AutomatedShippingSettings
+// PH15-TRACKING: Map Amazon fulfillment channel
+function mapFulfillmentChannel(amazonChannel: string): FulfillmentChannel {
+  switch (amazonChannel) {
+    case "MFN": return "FBM"; // Merchant Fulfilled Network = Fulfilled By Merchant
+    case "AFN": return "FBA"; // Amazon Fulfilled Network = Fulfilled By Amazon
+    default: return "UNKNOWN";
+  }
+}
+
+// PH15-TRACKING: Extract carrier from AutomatedShippingSettings (FBM only)
 function extractCarrier(order: AmazonOrder): string | null {
   if (order.AutomatedShippingSettings?.AutomatedCarrierName) {
     return order.AutomatedShippingSettings.AutomatedCarrierName;
@@ -71,6 +78,18 @@ function extractCarrier(order: AmazonOrder): string | null {
     return order.AutomatedShippingSettings.AutomatedCarrier;
   }
   return null;
+}
+
+// PH15-TRACKING: Determine tracking source based on fulfillment
+function determineTrackingSource(fulfillment: FulfillmentChannel, hasCarrier: boolean): TrackingSource {
+  if (fulfillment === "FBA") return "AMAZON_FBA";
+  if (hasCarrier) return "ORDERS_API";
+  return "NOT_AVAILABLE";
+}
+
+// PH15-TRACKING: Build Amazon order tracking URL for FBA
+function buildFbaTrackingUrl(orderId: string): string {
+  return `https://www.amazon.fr/gp/your-account/order-details?orderID=${orderId}`;
 }
 
 export async function fetchOrderItems(params: {
@@ -97,13 +116,16 @@ export async function backfillAmazonOrders(params: {
   tenantId: string;
   days: number;
   onProgress?: (count: number) => void;
-}): Promise<{ imported: number; errors: string[] }> {
+}): Promise<{ imported: number; errors: string[]; fbmCount: number; fbaCount: number }> {
   const { tenantId, days, onProgress } = params;
   const createdAfter = new Date();
   createdAfter.setDate(createdAfter.getDate() - days);
   console.log(`[Orders Backfill] Starting ${days}-day backfill for tenant ${tenantId}`);
   let imported = 0;
+  let fbmCount = 0;
+  let fbaCount = 0;
   const errors: string[] = [];
+  
   try {
     const creds = await getAmazonTenantCredentials(tenantId);
     if (!creds || !creds.refresh_token) throw new Error("Amazon OAuth not connected - no refresh token");
@@ -121,6 +143,7 @@ export async function backfillAmazonOrders(params: {
     const data = await response.json();
     const orders = data.payload?.Orders || [];
     console.log(`[Orders Backfill] Fetched ${orders.length} orders from Amazon`);
+    
     for (const amzOrder of orders) {
       try {
         let items: AmazonOrderItem[] = [];
@@ -128,9 +151,16 @@ export async function backfillAmazonOrders(params: {
         const totalAmount = amzOrder.OrderTotal ? parseFloat(amzOrder.OrderTotal.Amount) : 0;
         const currency = amzOrder.OrderTotal?.CurrencyCode || "EUR";
         
-        // PH15-TRACKING: Extract carrier from AutomatedShippingSettings
-        const carrier = extractCarrier(amzOrder);
-        // NOTE: TrackingNumber is NOT provided by Amazon Orders API - would need Shipping API or Reports
+        // PH15-TRACKING: Extract fulfillment, carrier, tracking source
+        const fulfillment = mapFulfillmentChannel(amzOrder.FulfillmentChannel);
+        const rawCarrier = extractCarrier(amzOrder);
+        const carrierNorm = rawCarrier ? normalizeCarrierName(rawCarrier) : null;
+        const carrier = fulfillment === "FBA" ? "Amazon Logistics" : (carrierNorm?.displayName || rawCarrier);
+        const trackingSource = determineTrackingSource(fulfillment, !!carrier);
+        const trackingUrl = fulfillment === "FBA" ? buildFbaTrackingUrl(amzOrder.AmazonOrderId) : (carrier ? buildTrackingUrl(carrier, null) : null);
+        
+        if (fulfillment === "FBM") fbmCount++;
+        if (fulfillment === "FBA") fbaCount++;
         
         await prisma.order.upsert({
           where: { tenantId_marketplace_externalOrderId: { tenantId, marketplace: MarketplaceType.AMAZON, externalOrderId: amzOrder.AmazonOrderId } },
@@ -140,8 +170,11 @@ export async function backfillAmazonOrders(params: {
             marketplace: MarketplaceType.AMAZON, customerName: amzOrder.BuyerInfo?.BuyerName || amzOrder.ShippingAddress?.Name || "Client Amazon",
             customerEmail: amzOrder.BuyerInfo?.BuyerEmail || null, orderDate: new Date(amzOrder.PurchaseDate), currency, totalAmount,
             orderStatus: mapAmazonStatus(amzOrder.OrderStatus), deliveryStatus: mapDeliveryStatus(amzOrder),
-            carrier: carrier, // Real carrier from SP-API
-            trackingCode: null, // Not available via Orders API
+            fulfillmentChannel: fulfillment,
+            carrier: carrier,
+            trackingCode: null, // Will be filled by Reports API for FBM
+            trackingUrl: trackingUrl,
+            trackingSource: trackingSource,
             shippingAddress: amzOrder.ShippingAddress ? amzOrder.ShippingAddress : undefined, updatedAt: new Date(),
             items: { create: items.map(item => ({ id: `itm_${amzOrder.AmazonOrderId}_${item.ASIN}`, asin: item.ASIN, sku: item.SellerSKU || null, title: item.Title || item.ASIN, quantity: item.QuantityOrdered, unitPrice: item.ItemPrice ? parseFloat(item.ItemPrice.Amount) / item.QuantityOrdered : 0 })) },
           },
@@ -149,7 +182,10 @@ export async function backfillAmazonOrders(params: {
             orderStatus: mapAmazonStatus(amzOrder.OrderStatus), 
             deliveryStatus: mapDeliveryStatus(amzOrder), 
             totalAmount, 
-            carrier: carrier, // Update carrier on sync
+            fulfillmentChannel: fulfillment,
+            carrier: carrier,
+            trackingSource: trackingSource,
+            trackingUrl: trackingUrl,
             updatedAt: new Date() 
           },
         });
@@ -158,8 +194,8 @@ export async function backfillAmazonOrders(params: {
       } catch (orderErr) { errors.push(`Order ${amzOrder.AmazonOrderId}: ${(orderErr as Error).message}`); console.error(`[Orders Backfill] ${amzOrder.AmazonOrderId}:`, orderErr); }
     }
   } catch (fetchErr) { errors.push(`Fetch error: ${(fetchErr as Error).message}`); console.error(`[Orders Backfill] Fetch error:`, fetchErr); }
-  console.log(`[Orders Backfill] Completed: ${imported} imported, ${errors.length} errors`);
-  return { imported, errors };
+  console.log(`[Orders Backfill] Completed: ${imported} imported (FBM: ${fbmCount}, FBA: ${fbaCount}), ${errors.length} errors`);
+  return { imported, errors, fbmCount, fbaCount };
 }
 
 // Query params interface
@@ -173,7 +209,21 @@ interface OrdersQueryParams {
   dateTo?: Date;
 }
 
-// Get orders with search and filters - includes tracking URL
+// Get tracking info with display names and URLs
+function getTrackingDisplayInfo(order: { carrier: string | null; trackingCode: string | null; trackingUrl: string | null; trackingSource: TrackingSource; fulfillmentChannel: FulfillmentChannel }) {
+  return {
+    carrier: order.carrier,
+    trackingCode: order.trackingCode,
+    trackingUrl: order.trackingUrl || (order.trackingCode && order.carrier ? buildTrackingUrl(order.carrier, order.trackingCode) : null),
+    trackingSource: order.trackingSource,
+    fulfillmentChannel: order.fulfillmentChannel,
+    isFba: order.fulfillmentChannel === "FBA",
+    isFbm: order.fulfillmentChannel === "FBM",
+    hasTracking: !!order.trackingCode || order.fulfillmentChannel === "FBA",
+  };
+}
+
+// Get orders with search and filters - includes tracking info
 export async function getOrdersForTenant(params: OrdersQueryParams): Promise<any[]> {
   const { tenantId, limit = 50, offset = 0, search, status, dateFrom, dateTo } = params;
   const where: any = { tenantId };
@@ -183,14 +233,22 @@ export async function getOrdersForTenant(params: OrdersQueryParams): Promise<any
   const orders = await prisma.order.findMany({ where, orderBy: { orderDate: "desc" }, take: limit, skip: offset, include: { items: true } });
   
   return orders.map(o => {
-    const tracking = getTrackingInfo(o.carrier, o.trackingCode);
+    const tracking = getTrackingDisplayInfo(o);
     return {
       id: o.id, ref: o.orderRef, externalOrderId: o.externalOrderId, date: o.orderDate.toISOString(),
       channel: o.marketplace.toLowerCase(), customer: { name: o.customerName, email: o.customerEmail },
       products: o.items.map(i => ({ name: i.title, qty: i.quantity, price: i.unitPrice, sku: i.sku, asin: i.asin })),
       orderStatus: o.orderStatus.toLowerCase(), deliveryStatus: o.deliveryStatus.toLowerCase().replace(/_/g, "_"),
       savStatus: o.savStatus.toLowerCase(), slaStatus: o.slaStatus.toLowerCase(),
-      carrier: tracking.carrierDisplayName, trackingCode: tracking.trackingNumber, trackingUrl: tracking.trackingUrl,
+      // Tracking fields
+      fulfillmentChannel: tracking.fulfillmentChannel,
+      carrier: tracking.carrier, 
+      trackingCode: tracking.trackingCode, 
+      trackingUrl: tracking.trackingUrl,
+      trackingSource: tracking.trackingSource,
+      isFba: tracking.isFba,
+      isFbm: tracking.isFbm,
+      hasTracking: tracking.hasTracking,
       totalAmount: o.totalAmount, currency: o.currency, conversationCount: 0,
     };
   });
@@ -206,7 +264,7 @@ export async function countOrdersForTenant(params: Omit<OrdersQueryParams, "limi
   return prisma.order.count({ where });
 }
 
-// Get single order by ID - includes tracking URL
+// Get single order by ID - includes full tracking info
 export async function getOrderById(params: { tenantId: string; orderId: string }): Promise<any | null> {
   const { tenantId, orderId } = params;
   const order = await prisma.order.findFirst({ where: { tenantId, OR: [{ id: orderId }, { externalOrderId: orderId }] }, include: { items: true } });
@@ -214,13 +272,21 @@ export async function getOrderById(params: { tenantId: string; orderId: string }
   
   const address = order.shippingAddress as any;
   const formattedAddress = address ? `${address.AddressLine1 || ""}, ${address.City || ""} ${address.PostalCode || ""}, ${address.CountryCode || ""}` : null;
-  const tracking = getTrackingInfo(order.carrier, order.trackingCode);
+  const tracking = getTrackingDisplayInfo(order);
   
   return {
     id: order.id, ref: order.orderRef, externalOrderId: order.externalOrderId, date: order.orderDate.toISOString(),
     channel: order.marketplace.toLowerCase(), status: order.orderStatus.toLowerCase(),
     deliveryStatus: order.deliveryStatus.toLowerCase().replace(/_/g, "_"), savStatus: order.savStatus.toLowerCase(), slaStatus: order.slaStatus.toLowerCase(),
-    carrier: tracking.carrierDisplayName, trackingCode: tracking.trackingNumber, trackingUrl: tracking.trackingUrl,
+    // Tracking fields
+    fulfillmentChannel: tracking.fulfillmentChannel,
+    carrier: tracking.carrier, 
+    trackingCode: tracking.trackingCode, 
+    trackingUrl: tracking.trackingUrl,
+    trackingSource: tracking.trackingSource,
+    isFba: tracking.isFba,
+    isFbm: tracking.isFbm,
+    hasTracking: tracking.hasTracking,
     customer: { name: order.customerName || "Client Amazon (PII masque)", email: order.customerEmail || null, phone: null, address: formattedAddress },
     products: order.items.map(i => ({ name: i.title || i.asin || "Produit", quantity: i.quantity, price: i.unitPrice, sku: i.sku, asin: i.asin })),
     totalAmount: order.totalAmount, currency: order.currency,
