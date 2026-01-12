@@ -155,11 +155,10 @@ export async function backfillAmazonOrders(params: {
     
     for (const amzOrder of orders) {
       try {
-        // Fetch order items
         let items: AmazonOrderItem[] = [];
         try {
           items = await fetchOrderItems({ tenantId, amazonOrderId: amzOrder.AmazonOrderId });
-          await new Promise(r => setTimeout(r, 500)); // Rate limit
+          await new Promise(r => setTimeout(r, 500));
         } catch (itemErr) {
           console.warn(`[Orders Backfill] Could not fetch items for ${amzOrder.AmazonOrderId}: ${itemErr}`);
         }
@@ -167,7 +166,6 @@ export async function backfillAmazonOrders(params: {
         const totalAmount = amzOrder.OrderTotal ? parseFloat(amzOrder.OrderTotal.Amount) : 0;
         const currency = amzOrder.OrderTotal?.CurrencyCode || "EUR";
         
-        // Upsert order
         await prisma.order.upsert({
           where: {
             tenantId_marketplace_externalOrderId: {
@@ -247,10 +245,11 @@ export async function getOrdersForTenant(params: {
   return orders.map(o => ({
     id: o.id,
     ref: o.orderRef,
+    externalOrderId: o.externalOrderId,
     date: o.orderDate.toISOString(),
     channel: o.marketplace.toLowerCase(),
     customer: { name: o.customerName, email: o.customerEmail },
-    products: o.items.map(i => ({ name: i.title, qty: i.quantity, price: i.unitPrice })),
+    products: o.items.map(i => ({ name: i.title, qty: i.quantity, price: i.unitPrice, sku: i.sku, asin: i.asin })),
     orderStatus: o.orderStatus.toLowerCase(),
     deliveryStatus: o.deliveryStatus.toLowerCase().replace(/_/g, "_"),
     savStatus: o.savStatus.toLowerCase(),
@@ -258,6 +257,68 @@ export async function getOrdersForTenant(params: {
     carrier: o.carrier,
     trackingCode: o.trackingCode,
     totalAmount: o.totalAmount,
+    currency: o.currency,
     conversationCount: 0,
   }));
+}
+
+// PH15-ORDERS-DETAIL-REAL-01: Get single order by ID
+export async function getOrderById(params: {
+  tenantId: string;
+  orderId: string;
+}): Promise<any | null> {
+  const { tenantId, orderId } = params;
+  
+  const order = await prisma.order.findFirst({
+    where: { 
+      tenantId,
+      OR: [
+        { id: orderId },
+        { externalOrderId: orderId },
+      ]
+    },
+    include: { items: true },
+  });
+  
+  if (!order) return null;
+  
+  // Format address for display
+  const address = order.shippingAddress as any;
+  const formattedAddress = address 
+    ? `${address.AddressLine1 || ""}, ${address.City || ""} ${address.PostalCode || ""}, ${address.CountryCode || ""}`
+    : null;
+  
+  return {
+    id: order.id,
+    ref: order.orderRef,
+    externalOrderId: order.externalOrderId,
+    date: order.orderDate.toISOString(),
+    channel: order.marketplace.toLowerCase(),
+    status: order.orderStatus.toLowerCase(),
+    deliveryStatus: order.deliveryStatus.toLowerCase().replace(/_/g, "_"),
+    savStatus: order.savStatus.toLowerCase(),
+    slaStatus: order.slaStatus.toLowerCase(),
+    carrier: order.carrier,
+    trackingCode: order.trackingCode,
+    customer: {
+      name: order.customerName || "Client Amazon (PII masque)",
+      email: order.customerEmail || null,
+      phone: null, // PII not available
+      address: formattedAddress,
+    },
+    products: order.items.map(i => ({
+      name: i.title || i.asin || "Produit",
+      quantity: i.quantity,
+      price: i.unitPrice,
+      sku: i.sku,
+      asin: i.asin,
+    })),
+    totalAmount: order.totalAmount,
+    currency: order.currency,
+    timeline: [
+      { date: order.orderDate.toISOString(), event: "Commande passee", status: "done" },
+      { date: order.updatedAt.toISOString(), event: "Derniere mise a jour", status: "current" },
+    ],
+    conversations: [],
+  };
 }

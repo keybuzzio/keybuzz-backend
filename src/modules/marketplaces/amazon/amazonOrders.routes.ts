@@ -3,7 +3,7 @@
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { devAuthenticateOrJwt } from "../../../lib/devAuthMiddleware";
-import { backfillAmazonOrders, getOrdersForTenant } from "./amazonOrders.service";
+import { backfillAmazonOrders, getOrdersForTenant, getOrderById } from "./amazonOrders.service";
 import type { AuthUser } from "../../auth/auth.types";
 
 export async function registerAmazonOrdersRoutes(server: FastifyInstance) {
@@ -38,6 +38,40 @@ export async function registerAmazonOrdersRoutes(server: FastifyInstance) {
       } catch (error) {
         console.error("[Orders] List error:", error);
         return reply.status(500).send({ error: "Failed to list orders" });
+      }
+    }
+  );
+  
+  /**
+   * GET /api/v1/orders/:orderId
+   * Get single order detail
+   */
+  server.get<{ Params: { orderId: string } }>(
+    "/api/v1/orders/:orderId",
+    { preHandler: authenticate },
+    async (request, reply) => {
+      const user = (request as FastifyRequest & { user: AuthUser }).user;
+      
+      if (!user || !user.tenantId) {
+        return reply.status(401).send({ error: "Unauthorized" });
+      }
+      
+      const { orderId } = request.params;
+      
+      try {
+        const order = await getOrderById({
+          tenantId: user.tenantId,
+          orderId,
+        });
+        
+        if (!order) {
+          return reply.status(404).send({ error: "Order not found" });
+        }
+        
+        return reply.send(order);
+      } catch (error) {
+        console.error("[Orders] Get detail error:", error);
+        return reply.status(500).send({ error: "Failed to get order" });
       }
     }
   );
