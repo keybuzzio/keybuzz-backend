@@ -1,11 +1,11 @@
 // src/modules/marketplaces/amazon/amazonOrdersSync.routes.ts
-// PH15-AMAZON-ORDERS-SYNC-SCALE-01: Global multi-tenant sync endpoints
+// PH15-AMAZON-ORDERS-SYNC-SCALE-02: Hardened global sync endpoints
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { devAuthenticateOrJwt } from "../../../lib/devAuthMiddleware";
 import type { AuthUser } from "../../auth/auth.types";
 import { runOrdersDeltaSync, getSyncStatus, syncMissingItems } from "./amazonOrdersSync.service";
-import { runGlobalOrdersSync, getGlobalSyncStatus } from "./amazonOrdersSyncGlobal.service";
+import { runGlobalOrdersSync, getGlobalSyncStatus, SyncReasonCode } from "./amazonOrdersSyncGlobal.service";
 
 export async function registerAmazonOrdersSyncRoutes(server: FastifyInstance) {
   const authenticate = devAuthenticateOrJwt;
@@ -27,14 +27,13 @@ export async function registerAmazonOrdersSyncRoutes(server: FastifyInstance) {
       
       try {
         if (tenantId) {
-          // Single tenant status
           const status = await getSyncStatus(tenantId);
           return reply.send(status);
         } else {
-          // Global status - all CONNECTED tenants
           const statuses = await getGlobalSyncStatus();
           return reply.send({
             totalTenants: statuses.length,
+            tenantsWithToken: statuses.filter(s => s.hasRefreshToken).length,
             tenants: statuses,
           });
         }
@@ -50,9 +49,7 @@ export async function registerAmazonOrdersSyncRoutes(server: FastifyInstance) {
   
   /**
    * POST /api/v1/orders/sync/run
-   * Run sync - global (all tenants) or single tenant
-   * If X-Tenant-Id header is provided, sync only that tenant
-   * Otherwise, run global multi-tenant sync
+   * Run sync for a specific tenant (requires X-Tenant-Id)
    */
   server.post(
     "/api/v1/orders/sync/run",
@@ -63,50 +60,31 @@ export async function registerAmazonOrdersSyncRoutes(server: FastifyInstance) {
         return reply.status(401).send({ error: "Unauthorized" });
       }
       
-      // Check if specific tenant requested via header or user context
       const tenantId = user.tenantId;
       
-      // If tenantId is provided and not "global", sync single tenant
-      if (tenantId && tenantId !== "global") {
-        console.log(`[Sync Run] Single tenant sync for ${tenantId} by ${user.email}`);
-        
-        try {
-          const result = await runOrdersDeltaSync(tenantId);
-          return reply.send({
-            mode: "single",
-            tenantId,
-            success: result.success,
-            ordersProcessed: result.ordersProcessed,
-            itemsProcessed: result.itemsProcessed,
-            errors: result.errors.slice(0, 10),
-            lastUpdatedAfter: result.lastUpdatedAfter,
-          });
-        } catch (error) {
-          console.error("[Sync Run] Error:", error);
-          return reply.status(500).send({ 
-            error: "Sync failed",
-            details: (error as Error).message 
-          });
-        }
+      if (!tenantId || tenantId === "global") {
+        return reply.status(400).send({ 
+          error: "X-Tenant-Id required for single tenant sync. Use /sync/run/global for multi-tenant." 
+        });
       }
       
-      // Global sync - all tenants
-      console.log(`[Sync Run] Global multi-tenant sync triggered by ${user.email}`);
+      console.log(`[Sync Run] Single tenant: ${tenantId} by ${user.email}`);
       
       try {
-        const result = await runGlobalOrdersSync();
+        const result = await runOrdersDeltaSync(tenantId);
         return reply.send({
-          mode: "global",
+          mode: "single",
+          tenantId,
           success: result.success,
-          tenantsProcessed: result.tenantsProcessed,
-          tenantsSkipped: result.tenantsSkipped,
-          totalDuration: result.totalDuration,
-          results: result.results,
+          ordersProcessed: result.ordersProcessed,
+          itemsProcessed: result.itemsProcessed,
+          errors: result.errors.slice(0, 10),
+          lastUpdatedAfter: result.lastUpdatedAfter,
         });
       } catch (error) {
-        console.error("[Global Sync Run] Error:", error);
+        console.error("[Sync Run] Error:", error);
         return reply.status(500).send({ 
-          error: "Global sync failed",
+          error: "Sync failed",
           details: (error as Error).message 
         });
       }
@@ -115,8 +93,8 @@ export async function registerAmazonOrdersSyncRoutes(server: FastifyInstance) {
   
   /**
    * POST /api/v1/orders/sync/run/global
-   * Explicit global sync endpoint (for CronJob)
-   * Does not require X-Tenant-Id header
+   * Run global multi-tenant sync (for CronJob)
+   * Hardened: skips tenants without valid credentials
    */
   server.post(
     "/api/v1/orders/sync/run/global",
@@ -131,13 +109,21 @@ export async function registerAmazonOrdersSyncRoutes(server: FastifyInstance) {
       
       try {
         const result = await runGlobalOrdersSync();
+        
         return reply.send({
           mode: "global",
           success: result.success,
-          tenantsProcessed: result.tenantsProcessed,
-          tenantsSkipped: result.tenantsSkipped,
+          summary: result.summary,
           totalDuration: result.totalDuration,
-          results: result.results,
+          results: result.results.map(r => ({
+            tenantId: r.tenantId,
+            status: r.status,
+            reasonCode: r.reasonCode,
+            ordersProcessed: r.ordersProcessed,
+            itemsProcessed: r.itemsProcessed,
+            message: r.message,
+          })),
+          reasonCodes: Object.values(SyncReasonCode),
         });
       } catch (error) {
         console.error("[Global Sync] Error:", error);
@@ -162,7 +148,7 @@ export async function registerAmazonOrdersSyncRoutes(server: FastifyInstance) {
         return reply.status(401).send({ error: "Unauthorized" });
       }
       
-      console.log(`[Items Sync] Manual trigger for tenant ${user.tenantId}`);
+      console.log(`[Items Sync] Trigger for ${user.tenantId}`);
       
       try {
         const result = await syncMissingItems(user.tenantId);
