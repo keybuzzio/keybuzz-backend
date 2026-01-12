@@ -1,6 +1,6 @@
 {
   "name": "keybuzz-backend",
-  "version": "1.0.14",
+  "version": "1.0.15",
   "description": "KeyBuzz Backend v3 - Fastify + TypeScript",
   "main": "dist/main.js",
   "license": "ISC",

@@ -1,5 +1,5 @@
 // src/modules/marketplaces/amazon/amazonOrders.service.ts
-// PH15-AMAZON-BACKFILL-ORDERS-01: Amazon Orders SP-API service
+// PH15-ORDERS-UI-SEARCH-01: Amazon Orders with search
 
 import { prisma } from "../../../lib/db";
 import { getAccessToken } from "./amazon.tokens";
@@ -54,82 +54,22 @@ function mapDeliveryStatus(order: AmazonOrder): DeliveryStatus {
   return "PREPARING";
 }
 
-export async function fetchAmazonOrders(params: {
-  tenantId: string;
-  createdAfter?: Date;
-  createdBefore?: Date;
-  maxResults?: number;
-}): Promise<AmazonOrder[]> {
-  const { tenantId, createdAfter, createdBefore, maxResults = 100 } = params;
-  
-  console.log(`[SP-API Orders] Fetching orders for tenant ${tenantId}`);
-  
-  const creds = await getAmazonTenantCredentials(tenantId);
-  if (!creds || !creds.refresh_token) {
-    throw new Error("Amazon OAuth not connected - no refresh token");
-  }
-  
-  const accessToken = await getAccessToken(creds.refresh_token);
-  const region = creds.region || "eu-west-1";
-  const endpoint = SPAPI_ENDPOINTS[region] || SPAPI_ENDPOINTS["eu-west-1"];
-  const marketplaceId = creds.marketplace_id || "A13V1IB3VIYZZH";
-  
-  const searchParams = new URLSearchParams();
-  searchParams.set("MarketplaceIds", marketplaceId);
-  if (createdAfter) searchParams.set("CreatedAfter", createdAfter.toISOString());
-  if (createdBefore) searchParams.set("CreatedBefore", createdBefore.toISOString());
-  searchParams.set("MaxResultsPerPage", String(Math.min(maxResults, 100)));
-  
-  const url = `${endpoint}/orders/v0/orders?${searchParams.toString()}`;
-  
-  const response = await fetch(url, {
-    method: "GET",
-    headers: {
-      "x-amz-access-token": accessToken,
-      "x-amz-date": new Date().toISOString().replace(/[:-]|\.\d{3}/g, ""),
-    },
-  });
-  
-  if (!response.ok) {
-    const errorText = await response.text();
-    console.error(`[SP-API Orders] Error ${response.status}: ${errorText}`);
-    throw new Error(`SP-API Orders error ${response.status}: ${errorText.substring(0, 200)}`);
-  }
-  
-  const data = await response.json();
-  return data.payload?.Orders || [];
-}
-
 export async function fetchOrderItems(params: {
   tenantId: string;
   amazonOrderId: string;
 }): Promise<AmazonOrderItem[]> {
   const { tenantId, amazonOrderId } = params;
-  
   const creds = await getAmazonTenantCredentials(tenantId);
-  if (!creds || !creds.refresh_token) {
-    throw new Error("Amazon OAuth not connected");
-  }
-  
+  if (!creds || !creds.refresh_token) throw new Error("Amazon OAuth not connected");
   const accessToken = await getAccessToken(creds.refresh_token);
   const region = creds.region || "eu-west-1";
   const endpoint = SPAPI_ENDPOINTS[region] || SPAPI_ENDPOINTS["eu-west-1"];
-  
   const url = `${endpoint}/orders/v0/orders/${amazonOrderId}/orderItems`;
-  
   const response = await fetch(url, {
     method: "GET",
-    headers: {
-      "x-amz-access-token": accessToken,
-      "x-amz-date": new Date().toISOString().replace(/[:-]|\.\d{3}/g, ""),
-    },
+    headers: { "x-amz-access-token": accessToken, "x-amz-date": new Date().toISOString().replace(/[:-]|\.\d{3}/g, "") },
   });
-  
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`SP-API OrderItems error ${response.status}: ${errorText.substring(0, 200)}`);
-  }
-  
+  if (!response.ok) throw new Error(`SP-API OrderItems error ${response.status}`);
   const data = await response.json();
   return data.payload?.OrderItems || [];
 }
@@ -140,185 +80,111 @@ export async function backfillAmazonOrders(params: {
   onProgress?: (count: number) => void;
 }): Promise<{ imported: number; errors: string[] }> {
   const { tenantId, days, onProgress } = params;
-  
   const createdAfter = new Date();
   createdAfter.setDate(createdAfter.getDate() - days);
-  
   console.log(`[Orders Backfill] Starting ${days}-day backfill for tenant ${tenantId}`);
-  
   let imported = 0;
   const errors: string[] = [];
-  
   try {
-    const orders = await fetchAmazonOrders({ tenantId, createdAfter });
+    const creds = await getAmazonTenantCredentials(tenantId);
+    if (!creds || !creds.refresh_token) throw new Error("Amazon OAuth not connected - no refresh token");
+    const accessToken = await getAccessToken(creds.refresh_token);
+    const region = creds.region || "eu-west-1";
+    const endpoint = SPAPI_ENDPOINTS[region] || SPAPI_ENDPOINTS["eu-west-1"];
+    const marketplaceId = creds.marketplace_id || "A13V1IB3VIYZZH";
+    const searchParams = new URLSearchParams();
+    searchParams.set("MarketplaceIds", marketplaceId);
+    searchParams.set("CreatedAfter", createdAfter.toISOString());
+    searchParams.set("MaxResultsPerPage", "100");
+    const url = `${endpoint}/orders/v0/orders?${searchParams.toString()}`;
+    const response = await fetch(url, { method: "GET", headers: { "x-amz-access-token": accessToken, "x-amz-date": new Date().toISOString().replace(/[:-]|\.\d{3}/g, "") } });
+    if (!response.ok) { const errorText = await response.text(); throw new Error(`SP-API Orders error ${response.status}: ${errorText.substring(0, 200)}`); }
+    const data = await response.json();
+    const orders = data.payload?.Orders || [];
     console.log(`[Orders Backfill] Fetched ${orders.length} orders from Amazon`);
-    
     for (const amzOrder of orders) {
       try {
         let items: AmazonOrderItem[] = [];
-        try {
-          items = await fetchOrderItems({ tenantId, amazonOrderId: amzOrder.AmazonOrderId });
-          await new Promise(r => setTimeout(r, 500));
-        } catch (itemErr) {
-          console.warn(`[Orders Backfill] Could not fetch items for ${amzOrder.AmazonOrderId}: ${itemErr}`);
-        }
-        
+        try { items = await fetchOrderItems({ tenantId, amazonOrderId: amzOrder.AmazonOrderId }); await new Promise(r => setTimeout(r, 500)); } catch (itemErr) { console.warn(`[Orders Backfill] Could not fetch items for ${amzOrder.AmazonOrderId}: ${itemErr}`); }
         const totalAmount = amzOrder.OrderTotal ? parseFloat(amzOrder.OrderTotal.Amount) : 0;
         const currency = amzOrder.OrderTotal?.CurrencyCode || "EUR";
-        
         await prisma.order.upsert({
-          where: {
-            tenantId_marketplace_externalOrderId: {
-              tenantId,
-              marketplace: MarketplaceType.AMAZON,
-              externalOrderId: amzOrder.AmazonOrderId,
-            },
-          },
+          where: { tenantId_marketplace_externalOrderId: { tenantId, marketplace: MarketplaceType.AMAZON, externalOrderId: amzOrder.AmazonOrderId } },
           create: {
             id: `ord_${amzOrder.AmazonOrderId.replace(/[^a-zA-Z0-9]/g, "_")}`,
-            tenantId,
-            externalOrderId: amzOrder.AmazonOrderId,
-            orderRef: `#${amzOrder.AmazonOrderId.substring(amzOrder.AmazonOrderId.length - 6)}`,
-            marketplace: MarketplaceType.AMAZON,
-            customerName: amzOrder.BuyerInfo?.BuyerName || amzOrder.ShippingAddress?.Name || "Client Amazon",
-            customerEmail: amzOrder.BuyerInfo?.BuyerEmail || null,
-            orderDate: new Date(amzOrder.PurchaseDate),
-            currency,
-            totalAmount,
-            orderStatus: mapAmazonStatus(amzOrder.OrderStatus),
-            deliveryStatus: mapDeliveryStatus(amzOrder),
-            shippingAddress: amzOrder.ShippingAddress ? amzOrder.ShippingAddress : undefined,
-            updatedAt: new Date(),
-            items: {
-              create: items.map(item => ({
-                id: `itm_${amzOrder.AmazonOrderId}_${item.ASIN}`,
-                asin: item.ASIN,
-                sku: item.SellerSKU || null,
-                title: item.Title || item.ASIN,
-                quantity: item.QuantityOrdered,
-                unitPrice: item.ItemPrice ? parseFloat(item.ItemPrice.Amount) / item.QuantityOrdered : 0,
-              })),
-            },
+            tenantId, externalOrderId: amzOrder.AmazonOrderId, orderRef: `#${amzOrder.AmazonOrderId.substring(amzOrder.AmazonOrderId.length - 6)}`,
+            marketplace: MarketplaceType.AMAZON, customerName: amzOrder.BuyerInfo?.BuyerName || amzOrder.ShippingAddress?.Name || "Client Amazon",
+            customerEmail: amzOrder.BuyerInfo?.BuyerEmail || null, orderDate: new Date(amzOrder.PurchaseDate), currency, totalAmount,
+            orderStatus: mapAmazonStatus(amzOrder.OrderStatus), deliveryStatus: mapDeliveryStatus(amzOrder),
+            shippingAddress: amzOrder.ShippingAddress ? amzOrder.ShippingAddress : undefined, updatedAt: new Date(),
+            items: { create: items.map(item => ({ id: `itm_${amzOrder.AmazonOrderId}_${item.ASIN}`, asin: item.ASIN, sku: item.SellerSKU || null, title: item.Title || item.ASIN, quantity: item.QuantityOrdered, unitPrice: item.ItemPrice ? parseFloat(item.ItemPrice.Amount) / item.QuantityOrdered : 0 })) },
           },
-          update: {
-            orderStatus: mapAmazonStatus(amzOrder.OrderStatus),
-            deliveryStatus: mapDeliveryStatus(amzOrder),
-            totalAmount,
-            updatedAt: new Date(),
-          },
+          update: { orderStatus: mapAmazonStatus(amzOrder.OrderStatus), deliveryStatus: mapDeliveryStatus(amzOrder), totalAmount, updatedAt: new Date() },
         });
-        
         imported++;
         if (onProgress) onProgress(imported);
-        
-      } catch (orderErr) {
-        const errMsg = `Order ${amzOrder.AmazonOrderId}: ${(orderErr as Error).message}`;
-        errors.push(errMsg);
-        console.error(`[Orders Backfill] ${errMsg}`);
-      }
+      } catch (orderErr) { errors.push(`Order ${amzOrder.AmazonOrderId}: ${(orderErr as Error).message}`); console.error(`[Orders Backfill] ${amzOrder.AmazonOrderId}:`, orderErr); }
     }
-    
-  } catch (fetchErr) {
-    errors.push(`Fetch error: ${(fetchErr as Error).message}`);
-    console.error(`[Orders Backfill] Fetch error:`, fetchErr);
-  }
-  
+  } catch (fetchErr) { errors.push(`Fetch error: ${(fetchErr as Error).message}`); console.error(`[Orders Backfill] Fetch error:`, fetchErr); }
   console.log(`[Orders Backfill] Completed: ${imported} imported, ${errors.length} errors`);
   return { imported, errors };
 }
 
-export async function getOrdersForTenant(params: {
+// Query params interface
+interface OrdersQueryParams {
   tenantId: string;
   limit?: number;
   offset?: number;
-}): Promise<any[]> {
-  const { tenantId, limit = 50, offset = 0 } = params;
-  
-  const orders = await prisma.order.findMany({
-    where: { tenantId },
-    orderBy: { orderDate: "desc" },
-    take: limit,
-    skip: offset,
-    include: { items: true },
-  });
-  
+  search?: string;
+  status?: string;
+  dateFrom?: Date;
+  dateTo?: Date;
+}
+
+// Get orders with search and filters
+export async function getOrdersForTenant(params: OrdersQueryParams): Promise<any[]> {
+  const { tenantId, limit = 50, offset = 0, search, status, dateFrom, dateTo } = params;
+  const where: any = { tenantId };
+  if (search) { where.externalOrderId = { contains: search, mode: "insensitive" }; }
+  if (status) { where.orderStatus = status.toUpperCase(); }
+  if (dateFrom || dateTo) { where.orderDate = {}; if (dateFrom) where.orderDate.gte = dateFrom; if (dateTo) where.orderDate.lte = dateTo; }
+  const orders = await prisma.order.findMany({ where, orderBy: { orderDate: "desc" }, take: limit, skip: offset, include: { items: true } });
   return orders.map(o => ({
-    id: o.id,
-    ref: o.orderRef,
-    externalOrderId: o.externalOrderId,
-    date: o.orderDate.toISOString(),
-    channel: o.marketplace.toLowerCase(),
-    customer: { name: o.customerName, email: o.customerEmail },
+    id: o.id, ref: o.orderRef, externalOrderId: o.externalOrderId, date: o.orderDate.toISOString(),
+    channel: o.marketplace.toLowerCase(), customer: { name: o.customerName, email: o.customerEmail },
     products: o.items.map(i => ({ name: i.title, qty: i.quantity, price: i.unitPrice, sku: i.sku, asin: i.asin })),
-    orderStatus: o.orderStatus.toLowerCase(),
-    deliveryStatus: o.deliveryStatus.toLowerCase().replace(/_/g, "_"),
-    savStatus: o.savStatus.toLowerCase(),
-    slaStatus: o.slaStatus.toLowerCase(),
-    carrier: o.carrier,
-    trackingCode: o.trackingCode,
-    totalAmount: o.totalAmount,
-    currency: o.currency,
-    conversationCount: 0,
+    orderStatus: o.orderStatus.toLowerCase(), deliveryStatus: o.deliveryStatus.toLowerCase().replace(/_/g, "_"),
+    savStatus: o.savStatus.toLowerCase(), slaStatus: o.slaStatus.toLowerCase(),
+    carrier: o.carrier, trackingCode: o.trackingCode, totalAmount: o.totalAmount, currency: o.currency, conversationCount: 0,
   }));
 }
 
-// PH15-ORDERS-DETAIL-REAL-01: Get single order by ID
-export async function getOrderById(params: {
-  tenantId: string;
-  orderId: string;
-}): Promise<any | null> {
+// Count orders with filters
+export async function countOrdersForTenant(params: Omit<OrdersQueryParams, "limit" | "offset">): Promise<number> {
+  const { tenantId, search, status, dateFrom, dateTo } = params;
+  const where: any = { tenantId };
+  if (search) { where.externalOrderId = { contains: search, mode: "insensitive" }; }
+  if (status) { where.orderStatus = status.toUpperCase(); }
+  if (dateFrom || dateTo) { where.orderDate = {}; if (dateFrom) where.orderDate.gte = dateFrom; if (dateTo) where.orderDate.lte = dateTo; }
+  return prisma.order.count({ where });
+}
+
+// Get single order by ID
+export async function getOrderById(params: { tenantId: string; orderId: string }): Promise<any | null> {
   const { tenantId, orderId } = params;
-  
-  const order = await prisma.order.findFirst({
-    where: { 
-      tenantId,
-      OR: [
-        { id: orderId },
-        { externalOrderId: orderId },
-      ]
-    },
-    include: { items: true },
-  });
-  
+  const order = await prisma.order.findFirst({ where: { tenantId, OR: [{ id: orderId }, { externalOrderId: orderId }] }, include: { items: true } });
   if (!order) return null;
-  
-  // Format address for display
   const address = order.shippingAddress as any;
-  const formattedAddress = address 
-    ? `${address.AddressLine1 || ""}, ${address.City || ""} ${address.PostalCode || ""}, ${address.CountryCode || ""}`
-    : null;
-  
+  const formattedAddress = address ? `${address.AddressLine1 || ""}, ${address.City || ""} ${address.PostalCode || ""}, ${address.CountryCode || ""}` : null;
   return {
-    id: order.id,
-    ref: order.orderRef,
-    externalOrderId: order.externalOrderId,
-    date: order.orderDate.toISOString(),
-    channel: order.marketplace.toLowerCase(),
-    status: order.orderStatus.toLowerCase(),
-    deliveryStatus: order.deliveryStatus.toLowerCase().replace(/_/g, "_"),
-    savStatus: order.savStatus.toLowerCase(),
-    slaStatus: order.slaStatus.toLowerCase(),
-    carrier: order.carrier,
-    trackingCode: order.trackingCode,
-    customer: {
-      name: order.customerName || "Client Amazon (PII masque)",
-      email: order.customerEmail || null,
-      phone: null, // PII not available
-      address: formattedAddress,
-    },
-    products: order.items.map(i => ({
-      name: i.title || i.asin || "Produit",
-      quantity: i.quantity,
-      price: i.unitPrice,
-      sku: i.sku,
-      asin: i.asin,
-    })),
-    totalAmount: order.totalAmount,
-    currency: order.currency,
-    timeline: [
-      { date: order.orderDate.toISOString(), event: "Commande passee", status: "done" },
-      { date: order.updatedAt.toISOString(), event: "Derniere mise a jour", status: "current" },
-    ],
+    id: order.id, ref: order.orderRef, externalOrderId: order.externalOrderId, date: order.orderDate.toISOString(),
+    channel: order.marketplace.toLowerCase(), status: order.orderStatus.toLowerCase(),
+    deliveryStatus: order.deliveryStatus.toLowerCase().replace(/_/g, "_"), savStatus: order.savStatus.toLowerCase(), slaStatus: order.slaStatus.toLowerCase(),
+    carrier: order.carrier, trackingCode: order.trackingCode,
+    customer: { name: order.customerName || "Client Amazon (PII masque)", email: order.customerEmail || null, phone: null, address: formattedAddress },
+    products: order.items.map(i => ({ name: i.title || i.asin || "Produit", quantity: i.quantity, price: i.unitPrice, sku: i.sku, asin: i.asin })),
+    totalAmount: order.totalAmount, currency: order.currency,
+    timeline: [{ date: order.orderDate.toISOString(), event: "Commande passee", status: "done" }, { date: order.updatedAt.toISOString(), event: "Derniere mise a jour", status: "current" }],
     conversations: [],
   };
 }
