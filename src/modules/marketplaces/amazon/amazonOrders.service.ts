@@ -1,10 +1,11 @@
 // src/modules/marketplaces/amazon/amazonOrders.service.ts
-// PH15-ORDERS-UI-SEARCH-01: Amazon Orders with search
+// PH15-TRACKING-REAL-01: Amazon Orders with tracking
 
 import { prisma } from "../../../lib/db";
 import { getAccessToken } from "./amazon.tokens";
 import { getAmazonTenantCredentials } from "./amazon.vault";
 import { MarketplaceType, OrderStatus, DeliveryStatus, SavStatus, SlaStatus } from "@prisma/client";
+import { getTrackingInfo } from "./carrierTracking.service";
 
 const SPAPI_ENDPOINTS: Record<string, string> = {
   "eu-west-1": "https://sellingpartnerapi-eu.amazon.com",
@@ -141,7 +142,7 @@ interface OrdersQueryParams {
   dateTo?: Date;
 }
 
-// Get orders with search and filters
+// Get orders with search and filters - includes tracking URL
 export async function getOrdersForTenant(params: OrdersQueryParams): Promise<any[]> {
   const { tenantId, limit = 50, offset = 0, search, status, dateFrom, dateTo } = params;
   const where: any = { tenantId };
@@ -149,14 +150,19 @@ export async function getOrdersForTenant(params: OrdersQueryParams): Promise<any
   if (status) { where.orderStatus = status.toUpperCase(); }
   if (dateFrom || dateTo) { where.orderDate = {}; if (dateFrom) where.orderDate.gte = dateFrom; if (dateTo) where.orderDate.lte = dateTo; }
   const orders = await prisma.order.findMany({ where, orderBy: { orderDate: "desc" }, take: limit, skip: offset, include: { items: true } });
-  return orders.map(o => ({
-    id: o.id, ref: o.orderRef, externalOrderId: o.externalOrderId, date: o.orderDate.toISOString(),
-    channel: o.marketplace.toLowerCase(), customer: { name: o.customerName, email: o.customerEmail },
-    products: o.items.map(i => ({ name: i.title, qty: i.quantity, price: i.unitPrice, sku: i.sku, asin: i.asin })),
-    orderStatus: o.orderStatus.toLowerCase(), deliveryStatus: o.deliveryStatus.toLowerCase().replace(/_/g, "_"),
-    savStatus: o.savStatus.toLowerCase(), slaStatus: o.slaStatus.toLowerCase(),
-    carrier: o.carrier, trackingCode: o.trackingCode, totalAmount: o.totalAmount, currency: o.currency, conversationCount: 0,
-  }));
+  
+  return orders.map(o => {
+    const tracking = getTrackingInfo(o.carrier, o.trackingCode);
+    return {
+      id: o.id, ref: o.orderRef, externalOrderId: o.externalOrderId, date: o.orderDate.toISOString(),
+      channel: o.marketplace.toLowerCase(), customer: { name: o.customerName, email: o.customerEmail },
+      products: o.items.map(i => ({ name: i.title, qty: i.quantity, price: i.unitPrice, sku: i.sku, asin: i.asin })),
+      orderStatus: o.orderStatus.toLowerCase(), deliveryStatus: o.deliveryStatus.toLowerCase().replace(/_/g, "_"),
+      savStatus: o.savStatus.toLowerCase(), slaStatus: o.slaStatus.toLowerCase(),
+      carrier: tracking.carrierDisplayName, trackingCode: tracking.trackingNumber, trackingUrl: tracking.trackingUrl,
+      totalAmount: o.totalAmount, currency: o.currency, conversationCount: 0,
+    };
+  });
 }
 
 // Count orders with filters
@@ -169,18 +175,21 @@ export async function countOrdersForTenant(params: Omit<OrdersQueryParams, "limi
   return prisma.order.count({ where });
 }
 
-// Get single order by ID
+// Get single order by ID - includes tracking URL
 export async function getOrderById(params: { tenantId: string; orderId: string }): Promise<any | null> {
   const { tenantId, orderId } = params;
   const order = await prisma.order.findFirst({ where: { tenantId, OR: [{ id: orderId }, { externalOrderId: orderId }] }, include: { items: true } });
   if (!order) return null;
+  
   const address = order.shippingAddress as any;
   const formattedAddress = address ? `${address.AddressLine1 || ""}, ${address.City || ""} ${address.PostalCode || ""}, ${address.CountryCode || ""}` : null;
+  const tracking = getTrackingInfo(order.carrier, order.trackingCode);
+  
   return {
     id: order.id, ref: order.orderRef, externalOrderId: order.externalOrderId, date: order.orderDate.toISOString(),
     channel: order.marketplace.toLowerCase(), status: order.orderStatus.toLowerCase(),
     deliveryStatus: order.deliveryStatus.toLowerCase().replace(/_/g, "_"), savStatus: order.savStatus.toLowerCase(), slaStatus: order.slaStatus.toLowerCase(),
-    carrier: order.carrier, trackingCode: order.trackingCode,
+    carrier: tracking.carrierDisplayName, trackingCode: tracking.trackingNumber, trackingUrl: tracking.trackingUrl,
     customer: { name: order.customerName || "Client Amazon (PII masque)", email: order.customerEmail || null, phone: null, address: formattedAddress },
     products: order.items.map(i => ({ name: i.title || i.asin || "Produit", quantity: i.quantity, price: i.unitPrice, sku: i.sku, asin: i.asin })),
     totalAmount: order.totalAmount, currency: order.currency,
