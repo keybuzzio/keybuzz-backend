@@ -25,6 +25,12 @@ interface AmazonOrder {
   ShippingAddress?: { Name?: string; AddressLine1?: string; City?: string; PostalCode?: string; CountryCode?: string };
   NumberOfItemsShipped?: number;
   NumberOfItemsUnshipped?: number;
+  // PH15-TRACKING: Carrier from SP-API
+  AutomatedShippingSettings?: {
+    AutomatedCarrier?: string;
+    AutomatedCarrierName?: string;
+    HasAutomatedShippingSettings?: boolean;
+  };
 }
 
 interface AmazonOrderItem {
@@ -65,6 +71,17 @@ function mapDeliveryStatus(order: AmazonOrder): DeliveryStatus {
   }
   return "PREPARING";
 }
+// PH15-TRACKING: Extract carrier from AutomatedShippingSettings
+function extractCarrier(order: AmazonOrder): string | null {
+  if (order.AutomatedShippingSettings?.AutomatedCarrierName) {
+    return order.AutomatedShippingSettings.AutomatedCarrierName;
+  }
+  if (order.AutomatedShippingSettings?.AutomatedCarrier) {
+    return order.AutomatedShippingSettings.AutomatedCarrier;
+  }
+  return null;
+}
+
 
 // Get or create sync state for a tenant
 async function getOrCreateSyncState(tenantId: string) {
@@ -256,6 +273,7 @@ async function upsertOrderWithItems(tenantId: string, amzOrder: AmazonOrder, ite
         orderStatus: mapAmazonStatus(amzOrder.OrderStatus),
         deliveryStatus: mapDeliveryStatus(amzOrder),
         totalAmount,
+        carrier: extractCarrier(amzOrder),
         customerName: amzOrder.BuyerInfo?.BuyerName || amzOrder.ShippingAddress?.Name || existing.customerName,
         customerEmail: amzOrder.BuyerInfo?.BuyerEmail || existing.customerEmail,
         shippingAddress: amzOrder.ShippingAddress ? amzOrder.ShippingAddress as any : undefined,

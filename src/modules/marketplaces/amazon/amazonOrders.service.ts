@@ -1,5 +1,5 @@
 // src/modules/marketplaces/amazon/amazonOrders.service.ts
-// PH15-TRACKING-REAL-01: Amazon Orders with tracking
+// PH15-TRACKING-PROVENANCE-AUDIT-01: Amazon Orders with REAL carrier from SP-API
 
 import { prisma } from "../../../lib/db";
 import { getAccessToken } from "./amazon.tokens";
@@ -23,6 +23,13 @@ interface AmazonOrder {
   ShippingAddress?: { Name?: string; AddressLine1?: string; City?: string; PostalCode?: string; CountryCode?: string };
   NumberOfItemsShipped?: number;
   NumberOfItemsUnshipped?: number;
+  // PH15-TRACKING: Add carrier fields from SP-API
+  AutomatedShippingSettings?: {
+    AutomatedCarrier?: string;
+    AutomatedCarrierName?: string;
+    HasAutomatedShippingSettings?: boolean;
+  };
+  ShipServiceLevel?: string;
 }
 
 interface AmazonOrderItem {
@@ -53,6 +60,17 @@ function mapDeliveryStatus(order: AmazonOrder): DeliveryStatus {
     return "IN_TRANSIT";
   }
   return "PREPARING";
+}
+
+// PH15-TRACKING: Extract carrier from AutomatedShippingSettings
+function extractCarrier(order: AmazonOrder): string | null {
+  if (order.AutomatedShippingSettings?.AutomatedCarrierName) {
+    return order.AutomatedShippingSettings.AutomatedCarrierName;
+  }
+  if (order.AutomatedShippingSettings?.AutomatedCarrier) {
+    return order.AutomatedShippingSettings.AutomatedCarrier;
+  }
+  return null;
 }
 
 export async function fetchOrderItems(params: {
@@ -109,6 +127,11 @@ export async function backfillAmazonOrders(params: {
         try { items = await fetchOrderItems({ tenantId, amazonOrderId: amzOrder.AmazonOrderId }); await new Promise(r => setTimeout(r, 500)); } catch (itemErr) { console.warn(`[Orders Backfill] Could not fetch items for ${amzOrder.AmazonOrderId}: ${itemErr}`); }
         const totalAmount = amzOrder.OrderTotal ? parseFloat(amzOrder.OrderTotal.Amount) : 0;
         const currency = amzOrder.OrderTotal?.CurrencyCode || "EUR";
+        
+        // PH15-TRACKING: Extract carrier from AutomatedShippingSettings
+        const carrier = extractCarrier(amzOrder);
+        // NOTE: TrackingNumber is NOT provided by Amazon Orders API - would need Shipping API or Reports
+        
         await prisma.order.upsert({
           where: { tenantId_marketplace_externalOrderId: { tenantId, marketplace: MarketplaceType.AMAZON, externalOrderId: amzOrder.AmazonOrderId } },
           create: {
@@ -117,10 +140,18 @@ export async function backfillAmazonOrders(params: {
             marketplace: MarketplaceType.AMAZON, customerName: amzOrder.BuyerInfo?.BuyerName || amzOrder.ShippingAddress?.Name || "Client Amazon",
             customerEmail: amzOrder.BuyerInfo?.BuyerEmail || null, orderDate: new Date(amzOrder.PurchaseDate), currency, totalAmount,
             orderStatus: mapAmazonStatus(amzOrder.OrderStatus), deliveryStatus: mapDeliveryStatus(amzOrder),
+            carrier: carrier, // Real carrier from SP-API
+            trackingCode: null, // Not available via Orders API
             shippingAddress: amzOrder.ShippingAddress ? amzOrder.ShippingAddress : undefined, updatedAt: new Date(),
             items: { create: items.map(item => ({ id: `itm_${amzOrder.AmazonOrderId}_${item.ASIN}`, asin: item.ASIN, sku: item.SellerSKU || null, title: item.Title || item.ASIN, quantity: item.QuantityOrdered, unitPrice: item.ItemPrice ? parseFloat(item.ItemPrice.Amount) / item.QuantityOrdered : 0 })) },
           },
-          update: { orderStatus: mapAmazonStatus(amzOrder.OrderStatus), deliveryStatus: mapDeliveryStatus(amzOrder), totalAmount, updatedAt: new Date() },
+          update: { 
+            orderStatus: mapAmazonStatus(amzOrder.OrderStatus), 
+            deliveryStatus: mapDeliveryStatus(amzOrder), 
+            totalAmount, 
+            carrier: carrier, // Update carrier on sync
+            updatedAt: new Date() 
+          },
         });
         imported++;
         if (onProgress) onProgress(imported);
