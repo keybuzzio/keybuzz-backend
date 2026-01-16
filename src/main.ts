@@ -20,6 +20,7 @@ import { registerOutboundRoutes } from "./modules/outbound/outbound.routes";
 import { registerOpsRoutes } from './modules/ops/ops.routes';
 import { registerTenantSyncRoutes } from "./modules/tenants/tenantSync.routes";
 import { registerAmazonFeesRoutes } from "./modules/marketplaces/amazon/amazonFees.routes";
+import { registerAttachmentsRoutes } from "./modules/attachments/attachments.routes";
 
 async function bootstrap() {
   const app = Fastify({ 
@@ -73,6 +74,7 @@ async function bootstrap() {
   await registerOutboundRoutes(app);
   await registerOpsRoutes(app);
   await registerTenantSyncRoutes(app);
+  registerAttachmentsRoutes(app);
 
   try {
     await app.listen({ port: env.PORT, host: "0.0.0.0" });

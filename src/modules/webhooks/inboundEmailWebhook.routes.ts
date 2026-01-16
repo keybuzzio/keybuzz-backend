@@ -1,9 +1,10 @@
-// PH15-INBOUND-TO-CONVERSATION-01: Inbound email webhook with conversation creation
+// PH15-INBOUND-TO-CONVERSATION-01 + PH-MVP-ATTACHMENTS-RENDER-01
 import type { FastifyInstance, FastifyPluginOptions } from "fastify";
 import { prisma } from "../../lib/db";
 import { MarketplaceType } from "@prisma/client";
 import { parseInboundAddress, processValidationEmail, updateMarketplaceStatusIfAmazon } from "../inbound/inbound.service";
 import { createInboxConversation } from "./inboxConversation.service";
+import { parseMimeEmail, storeAttachments } from "./attachmentParser.service";
 
 async function inboundEmailWebhookPlugin(server: FastifyInstance, _opts: FastifyPluginOptions) {
   /**
@@ -110,6 +111,12 @@ async function inboundEmailWebhookPlugin(server: FastifyInstance, _opts: Fastify
         return reply.send({ success: true, message: "Already processed", amazonForward: amazonUpdated });
       }
 
+      // ===== PH-MVP-ATTACHMENTS-RENDER-01: Parse MIME email =====
+      const parsedEmail = parseMimeEmail(payload.body);
+      const cleanBody = parsedEmail.textBody || payload.body;
+      
+      console.log(`[Webhook] Parsed email: textBody=${parsedEmail.textBody.length} chars, attachments=${parsedEmail.attachments.length}`);
+
       // Create ExternalMessage (backend DB)
       const externalMessage = await prisma.externalMessage.create({
         data: {
@@ -123,8 +130,9 @@ async function inboundEmailWebhookPlugin(server: FastifyInstance, _opts: Fastify
             from: payload.from,
             to: payload.to,
             subject: payload.subject || "",
-            body: payload.body,
+            body: cleanBody,  // Store clean body, not raw MIME
             messageId: payload.messageId,
+            attachmentCount: parsedEmail.attachments.length,
           },
         },
       });
@@ -144,22 +152,38 @@ async function inboundEmailWebhookPlugin(server: FastifyInstance, _opts: Fastify
         },
       });
 
-      // PH15: Create Inbox conversation + message (product DB)
+      // PH15: Create Inbox conversation + message (product DB) - with clean body
       let conversationResult = null;
+      let storedAttachments: any[] = [];
+      
       try {
         conversationResult = await createInboxConversation({
           tenantId,
           marketplace: 'amazon',
           from: payload.from,
           subject: payload.subject || 'Message Amazon',
-          body: payload.body || '',
+          body: cleanBody,  // Use clean body without base64
           messageId: payload.messageId,
           receivedAt: new Date(payload.receivedAt),
         });
         console.log("[Webhook] Inbox conversation created:", conversationResult);
+
+        // ===== PH-MVP-ATTACHMENTS-RENDER-01: Store attachments linked to message =====
+        if (parsedEmail.attachments.length > 0 && conversationResult.messageId) {
+          try {
+            storedAttachments = await storeAttachments({
+              tenantId,
+              messageId: conversationResult.messageId,
+              attachments: parsedEmail.attachments,
+            });
+            console.log(`[Webhook] Stored ${storedAttachments.length} attachments for message ${conversationResult.messageId}`);
+          } catch (attError) {
+            console.error("[Webhook] Failed to store attachments:", attError);
+            // Don't fail the request, continue without attachments
+          }
+        }
       } catch (convError) {
         console.error("[Webhook] Failed to create Inbox conversation:", convError);
-        // Don't fail the whole request, ExternalMessage was already saved
       }
 
       return reply.send({
@@ -168,6 +192,13 @@ async function inboundEmailWebhookPlugin(server: FastifyInstance, _opts: Fastify
         externalId: payload.messageId,
         amazonForward: amazonUpdated,
         conversation: conversationResult,
+        attachments: storedAttachments.map(a => ({
+          id: a.id,
+          filename: a.filename,
+          mimeType: a.mimeType,
+          size: a.size,
+          downloadUrl: a.downloadUrl,
+        })),
       });
 
     } catch (error) {
