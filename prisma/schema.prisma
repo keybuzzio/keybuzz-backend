@@ -466,9 +466,6 @@ model MarketplaceConnection {
   lastError     String?
 
   // PH15.2: Initial backfill tracking
-  initialBackfillDays     Int?       // Number of days for initial backfill (default 365)
-  initialBackfillDoneAt   DateTime?  // When initial backfill completed
-  initialBackfillStatus   String?    // success/failed/in_progress
   createdAt     DateTime                    @default(now())
   updatedAt     DateTime                    @updatedAt
 
@@ -489,6 +486,7 @@ model MarketplaceSyncState {
   initialBackfillDays     Int?       // Number of days for initial backfill (default 365)
   initialBackfillDoneAt   DateTime?  // When initial backfill completed
   initialBackfillStatus   String?    // success/failed/in_progress
+
   createdAt     DateTime        @default(now())
   updatedAt     DateTime        @updatedAt
 
@@ -586,9 +584,6 @@ model Job {
   lastError   String?   @db.Text
 
   // PH15.2: Initial backfill tracking
-  initialBackfillDays     Int?       // Number of days for initial backfill (default 365)
-  initialBackfillDoneAt   DateTime?  // When initial backfill completed
-  initialBackfillStatus   String?    // success/failed/in_progress
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
@@ -636,10 +631,6 @@ model InboundAddress {
   lastInboundMessageId String?
   lastError            String?
 
-  // PH15.2: Initial backfill tracking
-  initialBackfillDays     Int?       // Number of days for initial backfill (default 365)
-  initialBackfillDoneAt   DateTime?  // When initial backfill completed
-  initialBackfillStatus   String?    // success/failed/in_progress
   createdAt            DateTime                @default(now())
   updatedAt            DateTime                @updatedAt
 
