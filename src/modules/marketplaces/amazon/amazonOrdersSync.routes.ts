@@ -249,4 +249,61 @@ export async function registerAmazonOrdersSyncRoutes(server: FastifyInstance) {
       }
     }
   );
+
+  /**
+   * POST /api/v1/orders/import-one
+   * Import a single order by Amazon order reference
+   * PH24.4-ORDER-PANEL-IMPORT-ONDEMAND-01
+   */
+  server.post<{ Body: { tenantId?: string; orderRef: string } }>(
+    "/api/v1/orders/import-one",
+    { preHandler: authenticate },
+    async (request: FastifyRequest<{ Body: { tenantId?: string; orderRef: string } }>, reply) => {
+      const user = (request as FastifyRequest & { user: AuthUser }).user;
+      if (!user) {
+        return reply.status(401).send({ error: "Unauthorized" });
+      }
+      
+      const { orderRef } = request.body || {};
+      const tenantId = request.body?.tenantId || user.tenantId;
+      
+      if (!tenantId) {
+        return reply.status(400).send({ error: "tenantId required" });
+      }
+      
+      if (!orderRef) {
+        return reply.status(400).send({ error: "orderRef required" });
+      }
+      
+      console.log(`[Order Import] Request for ${orderRef} by ${user.email} (tenant: ${tenantId})`);
+      
+      try {
+        const { importSingleOrder } = await import("./amazonOrderImport.service");
+        const result = await importSingleOrder(tenantId, orderRef);
+        
+        if (!result.success) {
+          // Return appropriate status code based on error
+          const statusCode = result.error?.includes("rate limit") ? 429 : 
+                            result.error?.includes("not found") ? 404 : 500;
+          return reply.status(statusCode).send({
+            success: false,
+            error: result.error,
+          });
+        }
+        
+        return reply.send({
+          success: true,
+          orderId: result.orderId,
+          externalOrderId: result.externalOrderId,
+          imported: result.imported,
+        });
+      } catch (error) {
+        console.error("[Order Import] Error:", error);
+        return reply.status(500).send({ 
+          error: "Import failed",
+          details: (error as Error).message 
+        });
+      }
+    }
+  );
 }
