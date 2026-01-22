@@ -166,4 +166,87 @@ export async function registerAmazonOrdersSyncRoutes(server: FastifyInstance) {
       }
     }
   );
+  /**
+   * GET /api/v1/orders/sync/backfill/status
+   * Get backfill status for a tenant
+   * PH15.2-AMAZON-ORDERS-BACKFILL-365D-01
+   */
+  server.get<{ Querystring: { tenantId?: string } }>(
+    "/api/v1/orders/sync/backfill/status",
+    { preHandler: authenticate },
+    async (request: FastifyRequest<{ Querystring: { tenantId?: string } }>, reply) => {
+      const user = (request as FastifyRequest & { user: AuthUser }).user;
+      if (!user) {
+        return reply.status(401).send({ error: "Unauthorized" });
+      }
+      
+      const tenantId = request.query.tenantId || user.tenantId;
+      
+      if (!tenantId) {
+        return reply.status(400).send({ error: "tenantId required" });
+      }
+      
+      try {
+        const { getBackfillStatus } = await import("./amazonOrdersBackfill.service");
+        const status = await getBackfillStatus(tenantId);
+        return reply.send(status);
+      } catch (error) {
+        console.error("[Backfill Status] Error:", error);
+        return reply.status(500).send({ 
+          error: "Failed to get backfill status",
+          details: (error as Error).message 
+        });
+      }
+    }
+  );
+
+  /**
+   * POST /api/v1/orders/sync/backfill/run
+   * Manually trigger initial backfill for a tenant
+   * PH15.2-AMAZON-ORDERS-BACKFILL-365D-01
+   */
+  server.post<{ Querystring: { tenantId?: string; days?: string } }>(
+    "/api/v1/orders/sync/backfill/run",
+    { preHandler: authenticate },
+    async (request: FastifyRequest<{ Querystring: { tenantId?: string; days?: string } }>, reply) => {
+      const user = (request as FastifyRequest & { user: AuthUser }).user;
+      if (!user) {
+        return reply.status(401).send({ error: "Unauthorized" });
+      }
+      
+      const tenantId = request.query.tenantId || user.tenantId;
+      const days = parseInt(request.query.days || "365", 10);
+      
+      if (!tenantId) {
+        return reply.status(400).send({ error: "tenantId required" });
+      }
+      
+      if (days < 1 || days > 730) {
+        return reply.status(400).send({ error: "days must be between 1 and 730" });
+      }
+      
+      console.log(`[Backfill Run] Manual trigger for ${tenantId}, ${days} days by ${user.email}`);
+      
+      try {
+        const { runInitialBackfill } = await import("./amazonOrdersBackfill.service");
+        const result = await runInitialBackfill(tenantId, days);
+        
+        return reply.send({
+          success: result.success,
+          tenantId: result.tenantId,
+          daysBackfilled: result.daysBackfilled,
+          ordersProcessed: result.ordersProcessed,
+          itemsProcessed: result.itemsProcessed,
+          durationMs: result.durationMs,
+          errors: result.errors.slice(0, 10),
+        });
+      } catch (error) {
+        console.error("[Backfill Run] Error:", error);
+        return reply.status(500).send({ 
+          error: "Backfill failed",
+          details: (error as Error).message 
+        });
+      }
+    }
+  );
 }

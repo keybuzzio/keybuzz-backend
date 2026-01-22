@@ -3,6 +3,7 @@
 
 import { prisma } from "../../../lib/db";
 import { runOrdersDeltaSync, getSyncStatus } from "./amazonOrdersSync.service";
+import { runInitialBackfill, needsInitialBackfill, getBackfillStatus } from "./amazonOrdersBackfill.service";
 import { getAmazonTenantCredentials } from "./amazon.vault";
 import { MarketplaceType } from "@prisma/client";
 
@@ -292,8 +293,30 @@ export async function runGlobalOrdersSync(): Promise<GlobalSyncResult> {
       }
 
       try {
-        // Run delta sync (wrapped in try/catch)
-        const syncResult = await runOrdersDeltaSync(tenantId);
+        // PH15.2: Check if tenant needs initial backfill (365 days)
+        const needsBackfill = await needsInitialBackfill(tenantId);
+        
+        if (needsBackfill) {
+          console.log(`[Global Sync] ${tenantId}: Running initial 365-day backfill...`);
+          const backfillResult = await runInitialBackfill(tenantId, 365);
+          
+          result.results.push({
+            tenantId,
+            status: backfillResult.success ? "success" : "failed",
+            reasonCode: backfillResult.success ? SyncReasonCode.SUCCESS : SyncReasonCode.ERROR_UNKNOWN,
+            ordersProcessed: backfillResult.ordersProcessed,
+            itemsProcessed: backfillResult.itemsProcessed,
+            message: backfillResult.success ? `Initial backfill (${backfillResult.daysBackfilled}d)` : backfillResult.errors[0]?.substring(0, 200),
+          });
+          
+          if (backfillResult.success) {
+            result.summary.success++;
+          } else {
+            result.summary.failed++;
+          }
+        } else {
+          // Run normal delta sync
+          const syncResult = await runOrdersDeltaSync(tenantId);
         
         if (syncResult.success) {
           result.results.push({
@@ -328,6 +351,7 @@ export async function runGlobalOrdersSync(): Promise<GlobalSyncResult> {
         }
 
         console.log(`[Global Sync] ${tenantId}: ${syncResult.ordersProcessed} orders, ${syncResult.itemsProcessed} items`);
+        } // end else (delta sync)
 
       } catch (error) {
         const errorMsg = (error as Error).message;

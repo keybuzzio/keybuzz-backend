@@ -464,6 +464,11 @@ model MarketplaceConnection {
   vaultPath     String? // Référence du secret dans Vault (path)
   lastSyncAt    DateTime?
   lastError     String?
+
+  // PH15.2: Initial backfill tracking
+  initialBackfillDays     Int?       // Number of days for initial backfill (default 365)
+  initialBackfillDoneAt   DateTime?  // When initial backfill completed
+  initialBackfillStatus   String?    // success/failed/in_progress
   createdAt     DateTime                    @default(now())
   updatedAt     DateTime                    @updatedAt
 
@@ -479,6 +484,11 @@ model MarketplaceSyncState {
   lastPolledAt  DateTime?
   lastSuccessAt DateTime?
   lastError     String?
+
+  // PH15.2: Initial backfill tracking
+  initialBackfillDays     Int?       // Number of days for initial backfill (default 365)
+  initialBackfillDoneAt   DateTime?  // When initial backfill completed
+  initialBackfillStatus   String?    // success/failed/in_progress
   createdAt     DateTime        @default(now())
   updatedAt     DateTime        @updatedAt
 
@@ -574,6 +584,11 @@ model Job {
   lockedAt    DateTime?
   lockedBy    String?
   lastError   String?   @db.Text
+
+  // PH15.2: Initial backfill tracking
+  initialBackfillDays     Int?       // Number of days for initial backfill (default 365)
+  initialBackfillDoneAt   DateTime?  // When initial backfill completed
+  initialBackfillStatus   String?    // success/failed/in_progress
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
@@ -620,6 +635,11 @@ model InboundAddress {
   lastInboundAt        DateTime?
   lastInboundMessageId String?
   lastError            String?
+
+  // PH15.2: Initial backfill tracking
+  initialBackfillDays     Int?       // Number of days for initial backfill (default 365)
+  initialBackfillDoneAt   DateTime?  // When initial backfill completed
+  initialBackfillStatus   String?    // success/failed/in_progress
   createdAt            DateTime                @default(now())
   updatedAt            DateTime                @updatedAt
 

@@ -2,6 +2,7 @@ import Fastify from "fastify";
 import fastifyJwt from "@fastify/jwt";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
+import multipart from "@fastify/multipart";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
 import { env } from "./config/env";
@@ -31,6 +32,7 @@ async function bootstrap() {
   // Register CORS and Helmet
   await app.register(cors);
   await app.register(helmet);
+  await app.register(multipart, { limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB max
 
   // Register JWT plugin
   await app.register(fastifyJwt, {

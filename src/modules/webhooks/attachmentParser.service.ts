@@ -1,10 +1,11 @@
 /**
  * PH-MVP-ATTACHMENTS-RENDER-01: MIME Attachment Parser
  * Extracts attachments from multipart emails and stores them in MinIO
+ * Updated to use mailparser for robust MIME handling
  */
 
 import { Client as MinioClient } from 'minio';
-import { prisma } from '../../lib/db';
+import { simpleParser, ParsedMail } from 'mailparser';
 import { productDb } from '../../lib/productDb';
 import { randomBytes } from 'crypto';
 
@@ -46,110 +47,226 @@ export interface StoredAttachment {
 }
 
 /**
- * Parse a raw MIME email to extract body and attachments
+ * Parse a raw MIME email using mailparser for robust handling
  */
-export function parseMimeEmail(rawEmail: string): ParsedEmail {
+export async function parseMimeEmailAsync(rawEmail: string): Promise<ParsedEmail> {
   const result: ParsedEmail = {
     textBody: '',
     htmlBody: '',
     attachments: [],
   };
 
-  // Check if it's a multipart email
-  const boundaryMatch = rawEmail.match(/boundary="?([^"\s;]+)"?/i);
-  
-  if (!boundaryMatch) {
-    // Not multipart - just return the body
-    result.textBody = cleanBodyText(rawEmail);
-    return result;
-  }
-
-  const boundary = boundaryMatch[1];
-  const parts = rawEmail.split(new RegExp(`--${escapeRegex(boundary)}`));
-
-  for (const part of parts) {
-    if (part.trim() === '' || part.trim() === '--') continue;
-
-    const headerEnd = part.indexOf('\r\n\r\n') !== -1 ? part.indexOf('\r\n\r\n') : part.indexOf('\n\n');
-    if (headerEnd === -1) continue;
-
-    const headers = part.substring(0, headerEnd);
-    const body = part.substring(headerEnd + (part.includes('\r\n\r\n') ? 4 : 2));
-
-    const contentType = extractHeader(headers, 'Content-Type') || 'text/plain';
-    const contentDisposition = extractHeader(headers, 'Content-Disposition') || '';
-    const contentTransferEncoding = extractHeader(headers, 'Content-Transfer-Encoding') || '';
-    const contentId = extractHeader(headers, 'Content-ID')?.replace(/[<>]/g, '');
-
-    // Check if it's an attachment
-    const isAttachment = contentDisposition.toLowerCase().includes('attachment') ||
-                         contentDisposition.toLowerCase().includes('inline') ||
-                         isAttachmentType(contentType);
-
-    if (isAttachment && !contentType.startsWith('text/plain') && !contentType.startsWith('text/html')) {
-      // Extract attachment
-      const filename = extractFilename(contentDisposition, contentType) || `attachment_${Date.now()}`;
-      const mimeType = contentType.split(';')[0].trim();
-      const isInline = contentDisposition.toLowerCase().includes('inline') || !!contentId;
-
-      let content: Buffer;
-      if (contentTransferEncoding.toLowerCase() === 'base64') {
-        // Remove whitespace and decode base64
-        const cleanBase64 = body.replace(/[\r\n\s]/g, '');
-        content = Buffer.from(cleanBase64, 'base64');
-      } else if (contentTransferEncoding.toLowerCase() === 'quoted-printable') {
-        content = Buffer.from(decodeQuotedPrintable(body));
-      } else {
-        content = Buffer.from(body);
+  try {
+    // Add MIME headers if missing (common for Amazon forwarded emails)
+    let emailContent = rawEmail;
+    if (!emailContent.includes('MIME-Version:') && !emailContent.includes('Content-Type:')) {
+      // Check for boundary pattern in body
+      const boundaryMatch = emailContent.match(/(------=_Part_\d+)/);
+      if (boundaryMatch) {
+        emailContent = `MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="${boundaryMatch[1]}"\r\n\r\n${emailContent}`;
       }
-
-      result.attachments.push({
-        filename,
-        mimeType,
-        content,
-        contentId,
-        isInline,
-      });
-    } else if (contentType.startsWith('text/plain')) {
-      // Text body
-      let textContent = body;
-      if (contentTransferEncoding.toLowerCase() === 'base64') {
-        textContent = Buffer.from(body.replace(/[\r\n\s]/g, ''), 'base64').toString('utf-8');
-      } else if (contentTransferEncoding.toLowerCase() === 'quoted-printable') {
-        textContent = decodeQuotedPrintable(body);
-      }
-      result.textBody = cleanBodyText(textContent);
-    } else if (contentType.startsWith('text/html')) {
-      // HTML body
-      let htmlContent = body;
-      if (contentTransferEncoding.toLowerCase() === 'base64') {
-        htmlContent = Buffer.from(body.replace(/[\r\n\s]/g, ''), 'base64').toString('utf-8');
-      } else if (contentTransferEncoding.toLowerCase() === 'quoted-printable') {
-        htmlContent = decodeQuotedPrintable(body);
-      }
-      result.htmlBody = htmlContent;
     }
+
+    const parsed: ParsedMail = await simpleParser(emailContent);
+
+    // Extract text body
+    if (parsed.text) {
+      result.textBody = parsed.text.trim();
+    } else if (parsed.html) {
+      result.textBody = htmlToText(parsed.html);
+    }
+
+    // Extract attachments
+    if (parsed.attachments && parsed.attachments.length > 0) {
+      for (const att of parsed.attachments) {
+        if (att.content && att.content.length > 0) {
+          result.attachments.push({
+            filename: att.filename || `attachment_${Date.now()}`,
+            mimeType: att.contentType || 'application/octet-stream',
+            content: att.content,
+            contentId: att.contentId?.replace(/[<>]/g, ''),
+            isInline: att.contentDisposition === 'inline',
+          });
+          console.log(`[MimeParser] mailparser extracted: ${att.filename} (${att.content.length} bytes)`);
+        }
+      }
+    }
+
+    console.log(`[MimeParser] mailparser result: text=${result.textBody.length} chars, attachments=${result.attachments.length}`);
+
+  } catch (error) {
+    console.warn('[MimeParser] mailparser failed, falling back to manual:', error);
+    // Fallback to manual parsing
+    return parseMimeEmailManual(rawEmail);
   }
 
-  // If no text body but we have HTML, extract text from HTML
-  if (!result.textBody && result.htmlBody) {
-    result.textBody = htmlToText(result.htmlBody);
-  }
-
-  // If still no body, use the raw email minus obvious base64 blocks
-  if (!result.textBody) {
-    result.textBody = removeBase64Blocks(rawEmail);
+  // If mailparser found nothing, try manual
+  if (result.textBody.length === 0 && result.attachments.length === 0) {
+    console.log('[MimeParser] mailparser found nothing, trying manual');
+    return parseMimeEmailManual(rawEmail);
   }
 
   return result;
 }
 
 /**
- * Store attachments in MinIO and create DB records (productDb - message_attachments table)
+ * Synchronous wrapper for compatibility
+ */
+export function parseMimeEmail(rawEmail: string): ParsedEmail {
+  // For sync context, use manual parser
+  // Async version should be used when possible
+  return parseMimeEmailManual(rawEmail);
+}
+
+/**
+ * Manual MIME parser as fallback
+ */
+function parseMimeEmailManual(rawEmail: string): ParsedEmail {
+  const result: ParsedEmail = {
+    textBody: '',
+    htmlBody: '',
+    attachments: [],
+  };
+
+  // Check for Amazon simple format (Content-Disposition without proper MIME)
+  if (rawEmail.includes('Content-Disposition: attachment;') && rawEmail.includes('filename=')) {
+    console.log('[MimeParser] Detected Amazon simple format');
+    
+    // Split by boundary to get each part
+    const boundaryMatch = rawEmail.match(/------=_Part_[^\r\n]+/);
+    if (boundaryMatch) {
+      const boundary = boundaryMatch[0];
+      const parts = rawEmail.split(boundary);
+      console.log(`[MimeParser] Found ${parts.length} MIME parts`);
+      
+      for (let i = 0; i < parts.length; i++) {
+        const part = parts[i];
+        
+        // Skip parts without attachment disposition
+        if (!part.includes('Content-Disposition: attachment;') && !part.includes('Content-Disposition:attachment;')) {
+          continue;
+        }
+        
+        // Extract filename from this part
+        const fnMatch = part.match(/filename[*]?=['"]?([^'"\n;]+)/i);
+        if (!fnMatch) continue;
+        
+        let filename = fnMatch[1].trim();
+        if (filename.includes("''")) {
+          try { filename = decodeURIComponent(filename.split("''")[1] || filename); } catch {}
+        }
+        
+        // Determine mime type
+        let mimeType = 'application/octet-stream';
+        const ext = filename.toLowerCase().split('.').pop();
+        if (ext === 'pdf') mimeType = 'application/pdf';
+        else if (ext === 'jpg' || ext === 'jpeg') mimeType = 'image/jpeg';
+        else if (ext === 'png') mimeType = 'image/png';
+        
+        // Find base64 content in this part (after double newline)
+        const base64Match = part.match(/Content-Transfer-Encoding:\s*base64[\s\S]*?\n\n([A-Za-z0-9+/=\s]+)/i);
+        if (base64Match && base64Match[1]) {
+          const base64Content = base64Match[1].replace(/[\s\r\n]/g, '');
+          
+          if (base64Content.length > 100) {
+            try {
+              const buffer = Buffer.from(base64Content, 'base64');
+              console.log(`[MimeParser] Extracted attachment ${i}: ${filename} (${buffer.length} bytes)`);
+              result.attachments.push({
+                filename,
+                mimeType,
+                content: buffer,
+                isInline: false,
+              });
+            } catch (err) {
+              console.warn(`[MimeParser] Base64 decode failed for ${filename}:`, err);
+            }
+          }
+        }
+      }
+    }
+    
+    // Extract text from text/plain part (anywhere in the MIME structure)
+    // Amazon format: attachment first, then multipart/alternative with text
+    const textPlainMatch = rawEmail.match(/Content-Type:\s*text\/plain[^]*?\n\n([\s\S]*?)(?=------=_Part|$)/i);
+    if (textPlainMatch && textPlainMatch[1]) {
+      let extractedText = textPlainMatch[1].trim();
+      // Decode quoted-printable
+      extractedText = extractedText.replace(/=\r?\n/g, '');
+      extractedText = extractedText.replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+      
+      // Extract actual message after "Message:" header if present
+      const msgMatch = extractedText.match(/Message:[\s-]*\n\n([\s\S]*)/i);
+      if (msgMatch && msgMatch[1]) {
+        extractedText = msgMatch[1].trim();
+      }
+      
+      // Remove Amazon wrapper text
+      extractedText = extractedText.replace(/^Vous avez recu un message\.\s*/i, '');
+      extractedText = extractedText.trim();
+      
+      if (extractedText.length > 0) {
+        console.log('[MimeParser] Extracted text from text/plain part:', extractedText.substring(0, 100));
+        result.textBody = extractedText;
+      }
+    }
+    
+    // Fallback: try to get text before Content-Disposition
+    if (!result.textBody) {
+      const dispIdx = rawEmail.indexOf('Content-Disposition:');
+      if (dispIdx > 0) {
+        const textBefore = rawEmail.substring(0, dispIdx)
+          .replace(/------=_Part_\d+/g, '')
+          .replace(/Content-[^:]+:[^\n]+\n/gi, '')
+          .replace(/_\d+\.\d+/g, '')
+          .trim();
+        
+        if (textBefore.length > 3) {
+          result.textBody = textBefore;
+        }
+      }
+    }
+    
+    if (!result.textBody && result.attachments.length > 0) {
+      result.textBody = '[Pièce jointe reçue]';
+    }
+    
+    return result;
+  }
+
+  // Standard cleanup for non-MIME content
+  result.textBody = cleanBodyText(rawEmail);
+  return result;
+}
+
+function htmlToText(html: string): string {
+  return html
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .trim();
+}
+
+function cleanBodyText(text: string): string {
+  return text
+    .replace(/[A-Za-z0-9+/=]{100,}/g, '') // Remove base64 blocks
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/**
+ * Store attachments in MinIO and create DB records
  */
 export async function storeAttachments(params: {
   tenantId: string;
-  messageId: string;  // This is the conversation message ID from productDb
+  messageId: string;
   attachments: ParsedAttachment[];
 }): Promise<StoredAttachment[]> {
   const { tenantId, messageId, attachments } = params;
@@ -157,13 +274,11 @@ export async function storeAttachments(params: {
 
   for (const attachment of attachments) {
     try {
-      // Generate unique ID and storage key
       const id = generateId();
       const timestamp = Date.now();
       const safeFilename = sanitizeFilename(attachment.filename);
       const storageKey = `${tenantId}/${timestamp}-${id}-${safeFilename}`;
 
-      // Upload to MinIO
       await minioClient.putObject(
         BUCKET,
         storageKey,
@@ -172,7 +287,6 @@ export async function storeAttachments(params: {
         { 'Content-Type': attachment.mimeType }
       );
 
-      // Create DB record in productDb message_attachments table
       await productDb.query(
         `INSERT INTO message_attachments (
           id, message_id, tenant_id, filename, mime_type, size_bytes, 
@@ -200,97 +314,17 @@ export async function storeAttachments(params: {
         downloadUrl: `/api/v1/attachments/${id}`,
       });
 
-      console.log(`[AttachmentParser] Stored attachment: ${attachment.filename} (${attachment.mimeType}, ${attachment.content.length} bytes)`);
+      console.log(`[AttachmentParser] Stored: ${attachment.filename} (${attachment.mimeType}, ${attachment.content.length} bytes)`);
     } catch (error) {
-      console.error(`[AttachmentParser] Failed to store attachment ${attachment.filename}:`, error);
+      console.error(`[AttachmentParser] Failed to store ${attachment.filename}:`, error);
     }
   }
 
   return stored;
 }
 
-// Helper functions
-
-function escapeRegex(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function extractHeader(headers: string, name: string): string | null {
-  const regex = new RegExp(`^${name}:\\s*(.+)`, 'im');
-  const match = headers.match(regex);
-  return match ? match[1].trim() : null;
-}
-
-function extractFilename(disposition: string, contentType: string): string | null {
-  // Try Content-Disposition first
-  let match = disposition.match(/filename\*?=(?:UTF-8'')?["']?([^"';\r\n]+)/i);
-  if (match) return decodeURIComponent(match[1]);
-
-  // Try Content-Type
-  match = contentType.match(/name\*?=(?:UTF-8'')?["']?([^"';\r\n]+)/i);
-  if (match) return decodeURIComponent(match[1]);
-
-  return null;
-}
-
-function isAttachmentType(contentType: string): boolean {
-  const type = contentType.toLowerCase();
-  return type.startsWith('application/pdf') ||
-         type.startsWith('image/') ||
-         type.startsWith('audio/') ||
-         type.startsWith('video/') ||
-         type.includes('octet-stream');
-}
-
-function decodeQuotedPrintable(str: string): string {
-  return str
-    .replace(/=\r?\n/g, '')
-    .replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => 
-      String.fromCharCode(parseInt(hex, 16))
-    );
-}
-
-function htmlToText(html: string): string {
-  return html
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/p>/gi, '\n\n')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .trim();
-}
-
-function cleanBodyText(text: string): string {
-  // Remove base64-like blocks (long strings without spaces)
-  return text
-    .replace(/[A-Za-z0-9+/=]{100,}/g, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
-
-function removeBase64Blocks(text: string): string {
-  // Remove obvious base64 content
-  const lines = text.split('\n');
-  const cleanLines = lines.filter(line => {
-    const trimmed = line.trim();
-    // Skip lines that look like base64 (long alphanumeric strings)
-    if (trimmed.length > 76 && /^[A-Za-z0-9+/=]+$/.test(trimmed)) {
-      return false;
-    }
-    return true;
-  });
-  return cleanLines.join('\n').trim();
-}
-
 function sanitizeFilename(filename: string): string {
-  return filename
-    .replace(/[^a-zA-Z0-9._-]/g, '_')
-    .substring(0, 100);
+  return filename.replace(/[^a-zA-Z0-9._-]/g, '_').substring(0, 100);
 }
 
 function generateId(): string {
@@ -299,5 +333,6 @@ function generateId(): string {
 
 export default {
   parseMimeEmail,
+  parseMimeEmailAsync,
   storeAttachments,
 };

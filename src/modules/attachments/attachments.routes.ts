@@ -4,6 +4,7 @@
  */
 
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import '@fastify/multipart';
 import { prisma } from '../../lib/db';
 import { Client as MinioClient } from 'minio';
 import { devAuthenticateOrJwt } from '../../lib/devAuthMiddleware';
@@ -146,4 +147,106 @@ export function registerAttachmentsRoutes(app: FastifyInstance) {
       });
     }
   );
+
+  /**
+   * POST /api/v1/attachments/upload
+   * Upload attachment for outbound message
+   * Returns attachment info to include when sending message
+   */
+  app.post(
+    '/api/v1/attachments/upload',
+    { preHandler: devAuthenticateOrJwt },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const user = (request as any).user as AuthUser;
+      
+      try {
+        // Get multipart data
+        const data = await request.file();
+        if (!data) {
+          return reply.status(400).send({ error: 'No file uploaded' });
+        }
+
+        const filename = data.filename;
+        const mimeType = data.mimetype;
+        
+        // Validate file type
+        const allowedTypes = ['application/pdf', 'image/jpeg', 'image/png', 'image/gif'];
+        if (!allowedTypes.includes(mimeType)) {
+          return reply.status(400).send({ 
+            error: 'Invalid file type', 
+            message: 'Seuls les fichiers PDF et images (JPG, PNG, GIF) sont autorisés'
+          });
+        }
+
+        // Read file content
+        const chunks: Buffer[] = [];
+        for await (const chunk of data.file) {
+          chunks.push(chunk);
+        }
+        const fileBuffer = Buffer.concat(chunks);
+        
+        // Validate file size (max 10MB)
+        const maxSize = 10 * 1024 * 1024;
+        if (fileBuffer.length > maxSize) {
+          return reply.status(400).send({ 
+            error: 'File too large', 
+            message: 'La taille maximale est de 10 Mo'
+          });
+        }
+
+        // Generate unique ID and storage key
+        const attachmentId = 'att_' + Date.now().toString(36) + Math.random().toString(36).substring(2, 8);
+        const storageKey = `${user.tenantId}/outbound/${attachmentId}-${filename}`;
+        const bucket = 'keybuzz-attachments';
+
+        // Upload to MinIO
+        await minioClient.putObject(bucket, storageKey, fileBuffer, fileBuffer.length, {
+          'Content-Type': mimeType,
+        });
+
+        app.log.info({ attachmentId, filename, size: fileBuffer.length, tenantId: user.tenantId }, 'Outbound attachment uploaded');
+
+        return reply.send({
+          id: attachmentId,
+          filename,
+          mimeType,
+          size: fileBuffer.length,
+          storageKey,
+          status: 'uploaded',
+        });
+      } catch (error: any) {
+        app.log.error({ err: error }, 'Upload error');
+        return reply.status(500).send({ error: 'Upload failed', message: error.message });
+      }
+    }
+  );
+
+  /**
+   * GET /api/v1/attachments/channel-rules/:channel
+   * Get attachment rules for a channel
+   */
+  app.get<{ Params: { channel: string } }>(
+    '/api/v1/attachments/channel-rules/:channel',
+    async (request: FastifyRequest<{ Params: { channel: string } }>, reply: FastifyReply) => {
+      const { channel } = request.params;
+      
+      if (channel === 'amazon') {
+        return reply.send({
+          canSendAttachments: false,
+          reason: "Amazon Messaging n'accepte pas les pièces jointes. Utilisez un lien externe si nécessaire.",
+          maxSize: 0,
+          allowedTypes: []
+        });
+      }
+      
+      // Default: email channel
+      return reply.send({
+        canSendAttachments: true,
+        reason: null,
+        maxSize: 10 * 1024 * 1024, // 10MB
+        allowedTypes: ['application/pdf', 'image/jpeg', 'image/png', 'image/gif']
+      });
+    }
+  );
+
 }

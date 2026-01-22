@@ -6,6 +6,7 @@
 import { productDb } from '../../lib/productDb';
 import { randomBytes } from 'crypto';
 import { normalizeInboundMessage } from './messageNormalizer.service';
+import { parseMimeEmail, storeAttachments, ParsedAttachment } from './attachmentParser.service';
 
 // Generate cuid-like ID (compatible with existing data)
 function createId(): string {
@@ -13,6 +14,75 @@ function createId(): string {
   const random = randomBytes(8).toString('hex');
   return `cm${timestamp}${random}`.substring(0, 25);
 }
+
+// Simple MIME format parser for Amazon-style attachments (no boundary)
+function parseSimpleMimeFormat(body: string): { textBody: string; attachments: ParsedAttachment[] } {
+  const attachments: ParsedAttachment[] = [];
+  let textBody = '';
+
+  // Look for Content-Disposition: attachment pattern
+  const attMatch = body.match(/Content-Disposition:\s*attachment;\s*filename[*]?=['"]?([^'"\n;]+)/i);
+  
+  if (attMatch) {
+    let filename = attMatch[1].trim();
+    
+    // Decode RFC 2231 filename if needed
+    if (filename.includes("''")) {
+      const parts = filename.split("''");
+      try {
+        filename = decodeURIComponent(parts[1] || parts[0]);
+      } catch { /* keep original */ }
+    }
+    
+    console.log(`[SimpleParser] Found attachment: ${filename}`);
+    
+    // Determine mime type from filename
+    let mimeType = 'application/octet-stream';
+    if (filename.toLowerCase().endsWith('.pdf')) mimeType = 'application/pdf';
+    else if (filename.toLowerCase().endsWith('.jpg') || filename.toLowerCase().endsWith('.jpeg')) mimeType = 'image/jpeg';
+    else if (filename.toLowerCase().endsWith('.png')) mimeType = 'image/png';
+    
+    // Extract base64 content - look for PDF or image base64 patterns
+    const base64Match = body.match(/(?:JVBERi0|iVBORw0|\/9j\/)[A-Za-z0-9+\/=\s\n]+/);
+    
+    if (base64Match) {
+      const base64Content = base64Match[0].replace(/[\s\n]/g, '');
+      try {
+        const buffer = Buffer.from(base64Content, 'base64');
+        
+        if (buffer.length > 100) {
+          console.log(`[SimpleParser] Decoded ${buffer.length} bytes`);
+          attachments.push({
+            filename,
+            mimeType,
+            content: buffer,
+            isInline: false,
+          });
+        }
+      } catch (err) {
+        console.warn('[SimpleParser] Failed to decode base64:', err);
+      }
+    }
+    
+    // Extract any text before the attachment header
+    const headerIndex = body.indexOf('Content-Disposition:');
+    if (headerIndex > 0) {
+      textBody = body.substring(0, headerIndex).trim()
+        .replace(/Content-[^:]+:[^\n]+\n/gi, '')
+        .replace(/_\d+\.\d+\s*/g, '')
+        .trim();
+    }
+  }
+  
+  // If no text found and we have attachments, use placeholder
+  if (!textBody && attachments.length > 0) {
+    textBody = '[Pièce jointe reçue]';
+  }
+  
+  return { textBody, attachments };
+}
+
+
 
 interface InboundEmailPayload {
   tenantId: string;
@@ -216,6 +286,58 @@ export async function createInboxConversation(payload: InboundEmailPayload): Pro
   );
 
   console.log(`[InboxConversation] Created message: ${msgId}, threaded=${isThreaded}`);
+
+  // ===== PROCESS MIME ATTACHMENTS (PH-ATTACHMENTS-DOWNLOAD-TRUTH-01) =====
+  try {
+    // Check if body contains MIME content
+    const rawBody = payload.body;
+    if (rawBody && (rawBody.includes('Content-Disposition:') || rawBody.includes('Content-Type:') || /JVBERi0[A-Za-z0-9+\/=]{50,}/.test(rawBody))) {
+      console.log('[InboxConversation] Detected MIME content, parsing for attachments...');
+      
+      let parsed = parseMimeEmail(rawBody);
+      
+      // FALLBACK: If standard parser found nothing, try simple format parser
+      if (parsed.attachments.length === 0) {
+        console.log('[InboxConversation] Standard parser found 0 attachments, trying simple format...');
+        const simpleResult = parseSimpleMimeFormat(rawBody);
+        if (simpleResult.attachments.length > 0) {
+          parsed = { ...parsed, attachments: simpleResult.attachments, textBody: simpleResult.textBody || parsed.textBody };
+          console.log(`[InboxConversation] Simple parser found ${simpleResult.attachments.length} attachment(s)`);
+        }
+      }
+      
+      if (parsed.attachments.length > 0) {
+        console.log(`[InboxConversation] Found ${parsed.attachments.length} attachment(s), storing to MinIO...`);
+        
+        const stored = await storeAttachments({
+          tenantId,
+          messageId: msgId,
+          attachments: parsed.attachments,
+        });
+        
+        console.log(`[InboxConversation] Stored ${stored.length} attachment(s) successfully`);
+        
+        // Update message body if we extracted a cleaner text
+        if (parsed.textBody && parsed.textBody.length > 0 && parsed.textBody !== cleanBody) {
+          const newBody = parsed.textBody || '[Pièce jointe reçue]';
+          await productDb.query(
+            'UPDATE messages SET body = $1 WHERE id = $2',
+            [newBody, msgId]
+          );
+          console.log('[InboxConversation] Updated message body with parsed content');
+        } else if (parsed.attachments.length > 0 && (!parsed.textBody || parsed.textBody.length < 10)) {
+          // If we have attachments but no meaningful text, set a placeholder
+          await productDb.query(
+            'UPDATE messages SET body = $1 WHERE id = $2',
+            ['[Pièce jointe reçue]', msgId]
+          );
+          console.log('[InboxConversation] Set placeholder body for attachment-only message');
+        }
+      }
+    }
+  } catch (mimeError) {
+    console.warn('[InboxConversation] MIME attachment processing failed:', mimeError);
+  }
 
   // ===== UPDATE CONVERSATION STATS =====
   await productDb.query(

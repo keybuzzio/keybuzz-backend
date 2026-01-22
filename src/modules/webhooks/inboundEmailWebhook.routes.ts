@@ -44,6 +44,10 @@ async function inboundEmailWebhookPlugin(server: FastifyInstance, _opts: Fastify
         from: payload.from,
         to: payload.to,
         messageId: payload.messageId,
+        payloadKeys: Object.keys(payload),
+        textField: (payload as any).text?.substring(0, 100),
+        htmlField: (payload as any).html?.substring(0, 100),
+        bodyLength: payload.body?.length,
       });
 
       // Parse recipient first
@@ -112,6 +116,24 @@ async function inboundEmailWebhookPlugin(server: FastifyInstance, _opts: Fastify
       }
 
       // ===== PH-MVP-ATTACHMENTS-RENDER-01: Parse MIME email =====
+      // DEBUG: Log raw body structure in detail
+      console.log('[Webhook DEBUG] Raw body length:', payload.body?.length);
+      
+      // Find boundaries and show structure
+      const rawBody = payload.body || '';
+      const boundaryMatch = rawBody.match(/(------=_Part_[^\n\r]+)/);
+      if (boundaryMatch) {
+        const boundary = boundaryMatch[1];
+        console.log('[Webhook DEBUG] Boundary found:', boundary);
+        const parts = rawBody.split(boundary);
+        console.log('[Webhook DEBUG] Number of parts:', parts.length);
+        for (let i = 0; i < parts.length && i < 4; i++) {
+          console.log(`[Webhook DEBUG] Part ${i} (first 300 chars):`, parts[i].substring(0, 300).replace(/\n/g, '\\n'));
+        }
+      } else {
+        console.log('[Webhook DEBUG] No boundary found, first 1000 chars:', rawBody.substring(0, 1000));
+      }
+      
       const parsedEmail = parseMimeEmail(payload.body);
       const cleanBody = parsedEmail.textBody || payload.body;
       
