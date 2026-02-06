@@ -3,7 +3,11 @@
 // src/lib/vault.ts
 import { execSync } from "child_process";
 
-const VAULT_ADDR = process.env.VAULT_ADDR || "http://10.0.0.251:8200";
+// SECURITY: VAULT_ADDR must be injected via environment
+const VAULT_ADDR = process.env.VAULT_ADDR;
+if (!VAULT_ADDR) {
+  console.warn('[Vault] VAULT_ADDR not set. Vault integration will fail.');
+}
 const VAULT_TOKEN_FILE = "/vault/secrets/vault-token";
 
 /**

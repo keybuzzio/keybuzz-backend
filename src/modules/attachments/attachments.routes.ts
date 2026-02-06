@@ -10,7 +10,7 @@ import { Client as MinioClient } from 'minio';
 import { devAuthenticateOrJwt } from '../../lib/devAuthMiddleware';
 
 // MinIO client (internal only - via HAProxy)
-const minioEndpoint = process.env.MINIO_ENDPOINT?.replace('http://', '').split(':')[0] || '10.0.0.11';
+const minioEndpoint = process.env.MINIO_ENDPOINT?.replace('http://', '').split(':')[0] || '';
 const minioPort = parseInt(process.env.MINIO_PORT || '9000');
 
 const minioClient = new MinioClient({

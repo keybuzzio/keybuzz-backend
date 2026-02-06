@@ -10,7 +10,7 @@ import { productDb } from '../../lib/productDb';
 import { randomBytes } from 'crypto';
 
 // MinIO client (internal only - via HAProxy)
-const minioEndpoint = process.env.MINIO_ENDPOINT?.replace('http://', '').split(':')[0] || '10.0.0.11';
+const minioEndpoint = process.env.MINIO_ENDPOINT?.replace('http://', '').split(':')[0] || '';
 const minioPort = parseInt(process.env.MINIO_PORT || '9000');
 const BUCKET = process.env.MINIO_BUCKET_ATTACHMENTS || 'keybuzz-attachments';
 

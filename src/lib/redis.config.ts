@@ -27,7 +27,11 @@ export async function getRedisClient(): Promise<Redis> {
     });
   } else {
     // Fallback: build from parts (host, port, password)
-    const host = process.env.REDIS_HOST || '10.0.0.10';
+    const host = process.env.REDIS_HOST;
+    if (!host) {
+      console.error('[Redis] REDIS_HOST not set. Must be provided via environment.');
+      throw new Error('REDIS_HOST required');
+    }
     const port = parseInt(process.env.REDIS_PORT || '6379', 10);
 
     // Try to get password from Vault
