@@ -12,7 +12,7 @@ const envSchema = z.object({
     .pipe(z.number().int().positive()),
   DATABASE_URL: z
     .string()
-    .default("postgres://postgres:CHANGE_ME@10.0.0.10:5432/keybuzz_backend"),
+    .default(""),
   JWT_SECRET: z.string().min(1).default("CHANGE_ME_SECRET"),
   KEYBUZZ_SUPERADMIN_EMAIL: z.string().email().default("admin@keybuzz.io"),
   KEYBUZZ_SUPERADMIN_PASSWORD: z.string().min(1).default("change-me"),
